@@ -1,7 +1,11 @@
 """
 Main Orchestration Service for Bulk Video Scraper & Telegram Uploader.
 Coordinates Discovery (Crawler) -> Resilient Queue (SQLite) -> Sequential Downloader (yt-dlp) -> Telegram Uploader.
-Includes lightweight async HTTP health check endpoint on PORT for Railway container probes.
+Integrates:
+- Dynamic Database Settings overriding environment defaults (chat_id, target_url, cooldown, etc.)
+- Web Admin Dashboard server on Railway container PORT / HTTP_PORT
+- Telegram Bot Admin listener (modules/bot_admin.py) for Admin ID 6649712542
+- Worker loop respecting is_worker_paused() dynamic state
 """
 
 import os
@@ -19,6 +23,12 @@ from modules.database import db_manager
 from modules.crawler import UniversalCrawler
 from modules.downloader import downloader
 from modules.uploader import uploader
+from modules.admin_web import create_admin_app, start_admin_server, handle_root, handle_health, handle_stats
+from modules.bot_admin import run_bot_admin_listener
+
+# Backward-compatibility aliases for existing test suites
+create_health_app = create_admin_app
+start_health_server = start_admin_server
 
 # Setup structured logging
 logging.basicConfig(
@@ -34,76 +44,6 @@ logger = logging.getLogger("App")
 # Global lifecycle flags
 RUNNING = True
 START_TIME = time.time()
-
-
-# ==============================================================================
-# Lightweight Async HTTP Health Check Server
-# ==============================================================================
-
-async def handle_root(request: web.Request) -> web.Response:
-    """
-    Root endpoint returning service status, uptime, and current queue metrics.
-    Suitable for Railway default health checks (GET /).
-    """
-    uptime = round(time.time() - START_TIME, 2)
-    stats = db_manager.get_stats()
-    return web.json_response({
-        "status": "healthy",
-        "service": "Bulk Video Scraper & Telegram Uploader",
-        "uptime_seconds": uptime,
-        "queue": stats,
-    })
-
-
-async def handle_health(request: web.Request) -> web.Response:
-    """
-    Dedicated health check endpoint (GET /health or GET /healthz).
-    Returns 200 OK with queue status snapshot.
-    """
-    uptime = round(time.time() - START_TIME, 2)
-    stats = db_manager.get_stats()
-    return web.json_response({
-        "status": "healthy",
-        "uptime_seconds": uptime,
-        "queue": stats,
-    })
-
-
-async def handle_stats(request: web.Request) -> web.Response:
-    """Detailed queue statistics JSON endpoint (GET /stats)."""
-    stats = db_manager.get_stats()
-    return web.json_response({
-        "status": "ok",
-        "stats": stats,
-    })
-
-
-def create_health_app() -> web.Application:
-    """Factory creating lightweight aiohttp web application for health probes."""
-    app = web.Application()
-    app.router.add_get("/", handle_root)
-    app.router.add_get("/health", handle_health)
-    app.router.add_get("/healthz", handle_health)
-    app.router.add_get("/stats", handle_stats)
-    return app
-
-
-async def start_health_server(host: str, port: int) -> Optional[web.AppRunner]:
-    """
-    Starts the async HTTP health check server concurrently on the event loop.
-    Returns the AppRunner instance for clean shutdown lifecycle management.
-    """
-    try:
-        app = create_health_app()
-        runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, host=host, port=port)
-        await site.start()
-        logger.info(f"Health check HTTP server started on http://{host}:{port} (routes: /, /health, /healthz, /stats)")
-        return runner
-    except Exception as e:
-        logger.error(f"Failed to start health check HTTP server on {host}:{port}: {e}", exc_info=True)
-        return None
 
 
 # ==============================================================================
@@ -143,17 +83,17 @@ def setup_signal_handlers(shutdown_event: asyncio.Event, loop: asyncio.AbstractE
 # ==============================================================================
 
 async def run_discovery_phase(shutdown_event: Optional[asyncio.Event] = None) -> None:
-    """Phase 1: Discover video targets and enqueue to database."""
+    """Phase 1: Discover video targets and enqueue to database, honoring dynamic DB settings."""
     if shutdown_event and shutdown_event.is_set():
         return
 
-    target_url = config.CRAWL_TARGET_URL
+    # Check dynamic DB setting first, falling back to environment config
+    target_url, crawl_mode = db_manager.get_active_crawl_target()
     if not target_url:
-        logger.info("No CRAWL_TARGET_URL specified in environment. Skipping crawl.")
+        logger.info("No crawl target URL configured in database or environment. Skipping crawl.")
         return
 
-    crawl_mode = config.CRAWL_MODE
-    max_pages = config.MAX_PAGES
+    max_pages = db_manager.get_active_max_pages()
 
     logger.info("--- STARTING PHASE 1: DISCOVERY ---")
     logger.info(f"Target URL: {target_url} | Mode: {crawl_mode} | Max Pages: {max_pages}")
@@ -175,14 +115,33 @@ async def run_discovery_phase(shutdown_event: Optional[asyncio.Event] = None) ->
 
 
 async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
-    """Phase 2: Sequential Worker (Download 1 -> Upload 1 -> Delete 1 -> Cooldown -> Loop)."""
+    """
+    Phase 2: Sequential Worker (Download 1 -> Upload 1 -> Delete 1 -> Cooldown -> Loop).
+    Dynamically respects is_worker_paused() state and dynamic DB overrides.
+    """
     logger.info("--- STARTING PHASE 2: SEQUENTIAL WORKER PIPELINE ---")
     
     empty_queue_logged = False
+    paused_logged = False
     last_periodic_crawl = time.time()
-    crawl_interval = config.PERIODIC_CRAWL_INTERVAL  # 0 to disable recurring crawl
 
     while RUNNING and not shutdown_event.is_set():
+        # Check if worker is paused via Admin Dashboard
+        if is_worker_paused():
+            if not paused_logged:
+                logger.info("⏸ Worker loop is currently PAUSED via Admin Dashboard. Waiting for resume...")
+                paused_logged = True
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+        if paused_logged:
+            logger.info("▶ Worker loop RESUMED. Processing active queue...")
+            paused_logged = False
+
+        crawl_interval = config.PERIODIC_CRAWL_INTERVAL
         # Check if periodic re-crawl is enabled
         if crawl_interval > 0 and (time.time() - last_periodic_crawl) > crawl_interval:
             logger.info("Triggering scheduled periodic crawl...")
@@ -237,15 +196,17 @@ async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
             # 2. Update status to UPLOADING
             db_manager.set_status(video_id, "UPLOADING", file_size=file_size)
 
-            # 3. Upload to Telegram
+            # 3. Dynamic target chat ID & upload to Telegram
+            target_chat_id = config.TELEGRAM_CHAT_ID
             upload_success, upload_error = await uploader.upload_video(
                 file_path=file_path,
                 title=title,
-                metadata=metadata
+                metadata=metadata,
+                target_chat_id=target_chat_id
             )
 
             if upload_success:
-                logger.info(f"Task #{video_id} uploaded to Telegram successfully!")
+                logger.info(f"Task #{video_id} uploaded to Telegram ({target_chat_id}) successfully!")
                 db_manager.set_status(video_id, "COMPLETED")
             else:
                 logger.error(f"Upload failed for #{video_id}: {upload_error}")
@@ -288,7 +249,8 @@ async def main() -> None:
     parser.add_argument("--failed-summary", action="store_true", help="Display summary of failed tasks and error reasons")
     parser.add_argument("--purge-completed", type=int, nargs="?", const=7, default=None, help="Purge completed tasks older than N days (default: 7, 0 for all)")
     parser.add_argument("--clear-queue", type=str, nargs="?", const="ALL", default=None, help="Clear queue items (optional status filter e.g. FAILED, COMPLETED, or ALL)")
-    parser.add_argument("--no-health-server", action="store_true", help="Disable background HTTP health check server")
+    parser.add_argument("--no-health-server", action="store_true", help="Disable background HTTP admin/health server")
+    parser.add_argument("--no-bot-admin", action="store_true", help="Disable background Telegram Bot Admin listener")
     args = parser.parse_args()
 
     if args.stats:
@@ -349,10 +311,16 @@ async def main() -> None:
     shutdown_event = asyncio.Event()
     setup_signal_handlers(shutdown_event, loop)
 
-    # Start health check HTTP server concurrently
-    health_runner = None
+    # Start Web Admin Dashboard & Health HTTP server concurrently
+    admin_runner = None
     if not args.no_health_server:
-        health_runner = await start_health_server(config.HOST, config.PORT)
+        admin_runner = await start_admin_server(config.HOST, config.PORT)
+
+    # Start Telegram Bot Admin listener concurrently
+    bot_admin_task = None
+    if not args.no_bot_admin and config.TELEGRAM_BOT_TOKEN:
+        bot_admin_task = asyncio.create_task(run_bot_admin_listener(shutdown_event))
+        logger.info("Telegram Bot Admin listener task launched.")
 
     try:
         # Verify Telegram Bot connectivity
@@ -379,12 +347,22 @@ async def main() -> None:
             await run_worker_phase(shutdown_event)
 
     finally:
-        if health_runner:
-            logger.info("Shutting down health check HTTP server...")
+        # Shutdown bot admin listener
+        if bot_admin_task and not bot_admin_task.done():
+            bot_admin_task.cancel()
             try:
-                await health_runner.cleanup()
+                await bot_admin_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # Shutdown web admin server
+        if admin_runner:
+            logger.info("Shutting down Web Admin Dashboard HTTP server...")
+            try:
+                await admin_runner.cleanup()
             except Exception as e:
-                logger.warning(f"Error during health check server cleanup: {e}")
+                logger.warning(f"Error during Web Admin server cleanup: {e}")
+
         logger.info("Service shutdown completed cleanly.")
 
 

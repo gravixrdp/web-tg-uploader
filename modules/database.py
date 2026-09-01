@@ -60,7 +60,7 @@ class DatabaseManager:
                 conn.close()
 
     def init_db(self) -> None:
-        """Initialize the queue table and indices."""
+        """Initialize the queue table, settings table, and indices."""
         with self.get_cursor() as cursor:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS queue (
@@ -72,6 +72,13 @@ class DatabaseManager:
                     retry_count INTEGER DEFAULT 0,
                     file_size INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -428,11 +435,331 @@ class DatabaseManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def delete_task(self, task_id: int) -> bool:
+    def delete_task(self, video_id: int) -> bool:
         """Deletes a task by ID."""
         with self.get_cursor() as cursor:
-            cursor.execute("DELETE FROM queue WHERE id = ?;", (int(task_id),))
+            cursor.execute("DELETE FROM queue WHERE id = ?;", (int(video_id),))
             return cursor.rowcount > 0
+
+    def retry_task(self, video_id: int) -> bool:
+        """
+        Resets a single task by ID back to PENDING.
+        Returns True if the task was found and reset, False otherwise.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE queue
+                SET status = 'PENDING',
+                    error_message = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (int(video_id),))
+            count = cursor.rowcount
+            if count > 0:
+                logger.info(f"Task #{video_id} reset to 'PENDING' for retry.")
+            return count > 0
+
+    def retry_all_failed(self) -> int:
+        """
+        Resets all FAILED tasks back to PENDING.
+        Returns the count of tasks reset.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE queue
+                SET status = 'PENDING',
+                    error_message = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'FAILED';
+            """)
+            count = cursor.rowcount
+            if count > 0:
+                logger.info(f"Reset {count} failed task(s) to 'PENDING'.")
+            return count
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """
+        Retrieves a setting value by key. Returns default if key is not found.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("SELECT value FROM settings WHERE key = ?;", (key,))
+            row = cursor.fetchone()
+            if row is not None:
+                return row["value"]
+            return default
+
+    def set_setting(self, key: str, value: str) -> None:
+        """
+        Inserts or updates a setting key-value pair.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP;
+            """, (key, str(value)))
+
+    def delete_setting(self, key: str) -> bool:
+        """
+        Deletes a setting key-value pair from the database.
+        Returns True if deleted, False if key was not found.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("DELETE FROM settings WHERE key = ?;", (key,))
+            return cursor.rowcount > 0
+
+    def get_all_settings(self) -> Dict[str, str]:
+        """
+        Returns all stored settings as a dictionary of key-value pairs.
+        """
+        with self.get_cursor() as cursor:
+            cursor.execute("SELECT key, value FROM settings ORDER BY key ASC;")
+            return {row["key"]: row["value"] for row in cursor.fetchall()}
+
+    def is_worker_paused(self) -> bool:
+        """
+        Returns True if the worker is configured as paused in settings, False otherwise.
+        """
+        val = self.get_setting("worker_paused", default="false")
+        return str(val).strip().lower() in ("true", "1", "yes", "paused", "on")
+
+    def set_worker_paused(self, paused: bool) -> None:
+        """
+        Persists the worker pause state in the settings table.
+        """
+        self.set_setting("worker_paused", "true" if paused else "false")
+        logger.info(f"Worker paused state set to: {paused}")
+
+    def is_paused(self) -> bool:
+        """Convenience alias for is_worker_paused."""
+        return self.is_worker_paused()
+
+    def set_paused(self, paused: bool) -> None:
+        """Convenience alias for set_worker_paused."""
+        self.set_worker_paused(paused)
+
+    def get_active_chat_id(self) -> str:
+        """Returns the database-configured chat ID if present, else fallback to config."""
+        val = self.get_setting("chat_id") or self.get_setting("telegram_chat_id")
+        return val.strip() if val and val.strip() else config.TELEGRAM_CHAT_ID
+
+    def set_active_chat_id(self, chat_id: str) -> None:
+        """Persists updated target Telegram chat/channel ID in settings."""
+        self.set_setting("chat_id", chat_id.strip())
+
+    def get_active_crawl_target(self) -> Tuple[str, str]:
+        """Returns the active (target_url, crawl_mode) checking database first then config."""
+        url = self.get_setting("target_url") or self.get_setting("crawl_target_url") or config.CRAWL_TARGET_URL
+        mode = self.get_setting("crawl_mode") or config.CRAWL_MODE
+        return url, mode
+
+    def set_active_crawl_target(self, url: str, mode: Optional[str] = None) -> None:
+        """Persists updated target crawl URL and optional crawl mode in settings."""
+        self.set_setting("crawl_target_url", url.strip())
+        if mode:
+            self.set_setting("crawl_mode", mode.strip().lower())
+
+    def get_active_cooldown(self) -> int:
+        """Returns active upload cooldown in seconds, checking DB first then config."""
+        val = self.get_setting("upload_cooldown") or self.get_setting("cooldown")
+        if val is not None:
+            try:
+                return max(0, int(val))
+            except (ValueError, TypeError):
+                pass
+        return config.UPLOAD_COOLDOWN
+
+    def set_active_cooldown(self, cooldown: int) -> None:
+        """Persists upload cooldown setting in database."""
+        self.set_setting("upload_cooldown", str(max(0, int(cooldown))))
+
+    def get_active_max_pages(self) -> int:
+        """Returns active max pages for crawler, checking DB first then config."""
+        val = self.get_setting("max_pages")
+        if val is not None:
+            try:
+                return max(1, int(val))
+            except (ValueError, TypeError):
+                pass
+        return config.MAX_PAGES
+
+    def set_active_max_pages(self, max_pages: int) -> None:
+        """Persists max pages setting in database."""
+        self.set_setting("max_pages", str(max(1, int(max_pages))))
+
+    def get_active_periodic_crawl_interval(self) -> int:
+        """Returns active periodic crawl interval in seconds, checking DB first then config."""
+        val = self.get_setting("periodic_crawl_interval") or self.get_setting("crawl_interval")
+        if val is not None:
+            try:
+                return max(0, int(val))
+            except (ValueError, TypeError):
+                pass
+        return config.PERIODIC_CRAWL_INTERVAL
+
+    def set_active_periodic_crawl_interval(self, interval: int) -> None:
+        """Persists periodic crawl interval setting in database."""
+        self.set_setting("periodic_crawl_interval", str(max(0, int(interval))))
+
+    def get_effective_settings(self) -> Dict[str, Any]:
+        """
+        Returns a dictionary of effective runtime settings with active values and source (db vs env).
+        """
+        db_settings = self.get_all_settings()
+        target_url, crawl_mode = self.get_active_crawl_target()
+        chat_id = self.get_active_chat_id()
+        cooldown = self.get_active_cooldown()
+        max_pages = self.get_active_max_pages()
+        crawl_interval = self.get_active_periodic_crawl_interval()
+        paused = self.is_worker_paused()
+
+        return {
+            "worker_paused": {
+                "value": paused,
+                "source": "db" if "worker_paused" in db_settings else "default"
+            },
+            "chat_id": {
+                "value": chat_id,
+                "source": "db" if ("chat_id" in db_settings or "telegram_chat_id" in db_settings) else "env"
+            },
+            "target_url": {
+                "value": target_url,
+                "source": "db" if ("target_url" in db_settings or "crawl_target_url" in db_settings) else "env"
+            },
+            "crawl_mode": {
+                "value": crawl_mode,
+                "source": "db" if "crawl_mode" in db_settings else "env"
+            },
+            "cooldown": {
+                "value": cooldown,
+                "source": "db" if ("upload_cooldown" in db_settings or "cooldown" in db_settings) else "env"
+            },
+            "max_pages": {
+                "value": max_pages,
+                "source": "db" if "max_pages" in db_settings else "env"
+            },
+            "periodic_crawl_interval": {
+                "value": crawl_interval,
+                "source": "db" if ("periodic_crawl_interval" in db_settings or "crawl_interval" in db_settings) else "env"
+            },
+            "raw_db_settings": db_settings
+        }
+
+
+    def get_tasks(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Retrieves a paginated list of tasks matching optional status and search query,
+        along with the total count of matching tasks.
+
+        Returns: (tasks_list, total_count)
+        """
+        conditions = []
+        params: List[Any] = []
+
+        if status and status.upper() != 'ALL':
+            st_upper = status.upper()
+            if st_upper in ('IN_PROGRESS', 'ACTIVE'):
+                conditions.append("status IN ('DOWNLOADING', 'UPLOADING')")
+            elif ',' in st_upper:
+                statuses = [s.strip() for s in st_upper.split(',') if s.strip()]
+                placeholders = ','.join('?' for _ in statuses)
+                conditions.append(f"status IN ({placeholders})")
+                params.extend(statuses)
+            else:
+                conditions.append("status = ?")
+                params.append(st_upper)
+
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            conditions.append("(title LIKE ? OR video_url LIKE ? OR error_message LIKE ? OR CAST(id AS TEXT) LIKE ?)")
+            params.extend([term, term, term, term])
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        with self.get_cursor() as cursor:
+            # Get total matching count
+            count_query = f"SELECT COUNT(*) as total FROM queue {where_clause};"
+            cursor.execute(count_query, params)
+            count_row = cursor.fetchone()
+            total_count = count_row["total"] if count_row else 0
+
+            # Get paginated tasks
+            data_query = f"""
+                SELECT id, video_url, title, status, retry_count, error_message, file_size, created_at, updated_at
+                FROM queue
+                {where_clause}
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?;
+            """
+            cursor.execute(data_query, params + [int(limit), int(offset)])
+            tasks = [dict(row) for row in cursor.fetchall()]
+
+            return tasks, total_count
+
+    def list_tasks_paginated(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 10,
+        offset: int = 0,
+        order_desc: bool = True
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Retrieves paginated tasks with optional multi-status filter and text search,
+        along with the total matching count.
+        """
+        conditions = []
+        params: List[Any] = []
+
+        if status and status.upper() != 'ALL':
+            st_upper = status.upper()
+            if st_upper == 'IN_PROGRESS' or st_upper == 'ACTIVE':
+                conditions.append("status IN ('DOWNLOADING', 'UPLOADING')")
+            elif ',' in st_upper:
+                statuses = [s.strip() for s in st_upper.split(',') if s.strip()]
+                placeholders = ','.join('?' for _ in statuses)
+                conditions.append(f"status IN ({placeholders})")
+                params.extend(statuses)
+            else:
+                conditions.append("status = ?")
+                params.append(st_upper)
+
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            conditions.append("(title LIKE ? OR video_url LIKE ? OR error_message LIKE ? OR CAST(id AS TEXT) LIKE ?)")
+            params.extend([term, term, term, term])
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        direction = "DESC" if order_desc else "ASC"
+
+        with self.get_cursor() as cursor:
+            # Get total matching count
+            count_query = f"SELECT COUNT(*) as total FROM queue {where_clause};"
+            cursor.execute(count_query, params)
+            count_row = cursor.fetchone()
+            total_count = count_row["total"] if count_row else 0
+
+            # Get paginated tasks
+            data_query = f"""
+                SELECT id, video_url, title, status, retry_count, error_message, file_size, created_at, updated_at
+                FROM queue
+                {where_clause}
+                ORDER BY id {direction}
+                LIMIT ? OFFSET ?;
+            """
+            cursor.execute(data_query, params + [int(limit), int(offset)])
+            tasks = [dict(row) for row in cursor.fetchall()]
+
+            return tasks, total_count
+
 
     def get_detailed_stats(self) -> Dict[str, Any]:
         """Provides comprehensive statistics including storage size and processed volume."""
