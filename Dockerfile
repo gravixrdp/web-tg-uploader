@@ -10,17 +10,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Invalidate cache for new application version
+ENV APP_VERSION=2.0.0
+ENV PYTHONUNBUFFERED=1
+
 # Copy dependency definition and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Create runtime directories for SQLite persistence and ephemeral downloads
-RUN mkdir -p /app/data /app/temp_downloads
+RUN mkdir -p /app/data /app/temp_downloads /app/static
 
-# Copy application source code
+# Copy all application source code, static assets, and modules
 COPY . .
-
-# Set unbuffered output for real-time Railway logs
-ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "main.py"]
