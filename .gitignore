@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & sensitive keys
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Runtime data & temp downloads
+data/
+*.db
+*.db-wal
+*.db-shm
+temp_downloads/
+*.mp4
+*.mkv
+*.webm
+*.jpg
+*.webp
+*.png
+
+# Testing & Logs
+.pytest_cache/
+*.log
