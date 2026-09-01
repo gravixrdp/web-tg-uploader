@@ -23,7 +23,16 @@ from modules.database import db_manager
 from modules.crawler import UniversalCrawler
 from modules.downloader import downloader
 from modules.uploader import uploader
-from modules.admin_web import create_admin_app, start_admin_server, handle_root, handle_health, handle_stats
+from modules.admin_web import (
+    create_admin_app,
+    start_admin_server,
+    handle_root,
+    handle_health,
+    handle_stats,
+    is_worker_paused,
+    set_current_task,
+    clear_current_task
+)
 from modules.bot_admin import run_bot_admin_listener
 
 # Backward-compatibility aliases for existing test suites
@@ -177,6 +186,7 @@ async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
         logger.info("========================================================")
 
         file_path = None
+        set_current_task(video_id, video_url, title, stage="DOWNLOADING")
         try:
             # 1. Download video
             file_path, metadata, error = await downloader.download_video(video_id, video_url)
@@ -194,10 +204,11 @@ async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
                 break
 
             # 2. Update status to UPLOADING
+            set_current_task(video_id, video_url, title, stage="UPLOADING", file_size=file_size)
             db_manager.set_status(video_id, "UPLOADING", file_size=file_size)
 
             # 3. Dynamic target chat ID & upload to Telegram
-            target_chat_id = config.TELEGRAM_CHAT_ID
+            target_chat_id = db_manager.get_active_chat_id()
             upload_success, upload_error = await uploader.upload_video(
                 file_path=file_path,
                 title=title,
@@ -217,6 +228,7 @@ async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
             db_manager.set_status(video_id, "FAILED", error_message=f"Pipeline Exception: {str(e)}")
 
         finally:
+            clear_current_task()
             # 4. Strictly guaranteed cleanup in all conditions
             if file_path:
                 downloader.cleanup_file(file_path)
