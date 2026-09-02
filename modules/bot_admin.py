@@ -498,70 +498,82 @@ class TelegramAdminBot:
         )
 
     async def handle_scrape(self, chat_id: int, args_text: str) -> None:
-        """Handles /scrape [url] [mode] [pages] to trigger discovery crawler."""
+        """
+        Handles /scrape [url] [count] [mode] [pages] to trigger deep full-video crawler.
+        Examples:
+        - /scrape https://example.com 30 (extracts exactly 30 full videos, skips 3-5s previews)
+        - /scrape https://example.com 50 deep
+        - /scrape 30 (uses saved target URL and extracts 30 full videos)
+        """
         parts = args_text.strip().split()
         target_url = ""
-        mode = "auto"
+        mode = "deep"
+        max_videos = 30
         max_pages = 10
 
         if parts:
             if parts[0].startswith("http://") or parts[0].startswith("https://"):
                 target_url = parts[0].strip()
-                if len(parts) > 1:
-                    if parts[1].isdigit():
-                        max_pages = int(parts[1])
-                    else:
-                        mode = parts[1].lower().strip()
+                if len(parts) > 1 and parts[1].isdigit():
+                    max_videos = max(1, min(500, int(parts[1])))
+                elif len(parts) > 1:
+                    mode = parts[1].lower().strip()
+
                 if len(parts) > 2 and parts[2].isdigit():
                     max_pages = int(parts[2])
+                elif len(parts) > 2:
+                    mode = parts[2].lower().strip()
             elif parts[0].isdigit():
-                max_pages = int(parts[0])
+                max_videos = max(1, min(500, int(parts[0])))
+                if len(parts) > 1:
+                    mode = parts[1].lower().strip()
 
         if not target_url:
             saved_url, saved_mode = db_manager.get_active_crawl_target()
             target_url = saved_url
             if not parts or not mode or mode == "auto":
-                mode = saved_mode or "auto"
+                mode = saved_mode or "deep"
 
         if not target_url:
             await self.send_message(
                 chat_id,
                 "⚠️ <b>No Scrape Target Configured</b>\n\n"
-                "<b>Usage:</b> <code>/scrape &lt;url&gt; [mode] [pages]</code>\n"
-                "<i>Example:</i> <code>/scrape https://example.com/sitemap.xml sitemap</code>\n"
+                "<b>Usage:</b> <code>/scrape &lt;url&gt; [count] [mode]</code>\n"
+                "<i>Example:</i> <code>/scrape https://example.com 30</code>\n"
                 "<i>Or set a default target first with <code>/seturl &lt;url&gt;</code>.</i>"
             )
             return
 
         status_msg = await self.send_message(
             chat_id,
-            f"🕷️ <b>Crawler Discovery Started...</b>\n\n"
-            f"• <b>Target:</b> <code>{escape_html(target_url)}</code>\n"
-            f"• <b>Mode:</b> <code>{escape_html(mode)}</code>\n"
+            f"🕷️ <b>Deep Video Scraper Started...</b>\n\n"
+            f"• <b>Target Website:</b> <code>{escape_html(target_url)}</code>\n"
+            f"• <b>Requested Videos:</b> <code>{max_videos}</code> (Full Length)\n"
+            f"• <b>Mode:</b> <code>{escape_html(mode)}</code> (Skip 3-5s Previews)\n"
             f"• <b>Max Pages:</b> <code>{max_pages}</code>\n\n"
-            "<i>Scanning for media items and streams...</i>"
+            "<i>Deep crawling each watch page to extract full player streams...</i>"
         )
 
         try:
             crawler = UniversalCrawler()
-            discovered = await crawler.discover(target_url, mode=mode, max_pages=max_pages)
+            discovered = await crawler.discover(target_url, mode=mode, max_pages=max_pages, max_videos=max_videos)
 
             if not discovered:
                 res_text = (
-                    f"⚠️ <b>Discovery Complete: 0 Items Found</b>\n\n"
+                    f"⚠️ <b>Discovery Complete: 0 Full Videos Found</b>\n\n"
                     f"• <b>Target:</b> <code>{escape_html(target_url)}</code>\n"
                     f"• <b>Mode:</b> <code>{escape_html(mode)}</code>\n"
-                    "<i>No video or stream links could be found. Check URL or try another mode.</i>"
+                    "<i>No valid full-length videos found. Check URL or try another category.</i>"
                 )
             else:
-                inserted, ignored = db_manager.enqueue_batch(discovered)
+                inserted, ignored = db_manager.enqueue_batch(discovered, media_type="video")
                 res_text = (
-                    f"✅ <b>Discovery Complete!</b>\n\n"
+                    f"✅ <b>Deep Scrape Complete!</b>\n\n"
                     f"• <b>Target:</b> <code>{escape_html(target_url)}</code>\n"
-                    f"• <b>Discovered:</b> <code>{len(discovered)}</code>\n"
+                    f"• <b>Full Videos Found:</b> <code>{len(discovered)}</code>\n"
                     f"• <b>Newly Enqueued:</b> <code>{inserted}</code>\n"
-                    f"• <b>Duplicates Skipped:</b> <code>{ignored}</code>\n\n"
-                    "<i>Worker pipeline will process pending items automatically.</i>"
+                    f"• <b>Previews/Duplicates Skipped:</b> <code>{ignored}</code>\n\n"
+                    "<i>Worker is downloading and uploading full videos to Telegram sequentially.</i>"
                 )
 
             stats_btn = {"inline_keyboard": [[{"text": "📊 View Stats", "callback_data": "cb:stats"}]]}

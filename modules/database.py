@@ -19,6 +19,59 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB_PATH = config.DB_PATH
 
 
+# Recognized extensions for strict media segregation
+IMAGE_EXTENSIONS = (
+    '.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.ico',
+    '.bmp', '.tiff', '.avif', '.heic'
+)
+
+VIDEO_EXTENSIONS = (
+    '.mp4', '.mkv', '.webm', '.mov', '.m3u8', '.ts', '.avi',
+    '.flv', '.wmv', '.m4v', '.3gp', '.mpd', '.f4v', '.vob', '.ogv'
+)
+
+TRACKING_PARAMS = {
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+    'fbclid', 'gclid', 'msclkid', 'mc_cid', 'mc_eid', 'ref', 'source',
+    '_ga', '_gl', 'yclid', 'zanpid'
+}
+
+
+def normalize_media_url(url: str) -> str:
+    """Canonicalizes a URL for 100% airtight deduplication."""
+    if not url:
+        return ""
+    from urllib.parse import urlparse, parse_qsl, urlencode
+    url = url.strip().strip("'\"").replace("&amp;", "&")
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return url
+
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=False)
+        cleaned_pairs = [(k, v) for k, v in query_pairs if k.lower() not in TRACKING_PARAMS]
+        clean_query = urlencode(cleaned_pairs)
+
+        clean_path = parsed.path.rstrip('/') if parsed.path != '/' else '/'
+
+        rebuilt = f"{scheme}://{netloc}{clean_path}"
+        if clean_query:
+            rebuilt = f"{rebuilt}?{clean_query}"
+        return rebuilt
+    except Exception:
+        return url.strip()
+
+
+def is_image_url(url: str) -> bool:
+    """Check if URL points to a static image file."""
+    from urllib.parse import urlparse
+    path = urlparse(url.lower()).path.rstrip('/')
+    return path.endswith(IMAGE_EXTENSIONS)
+
+
 class DatabaseManager:
     """Manages SQLite queue with WAL mode, thread-safety, and resilient concurrency."""
 
@@ -34,7 +87,6 @@ class DatabaseManager:
         """Create a new SQLite connection with optimized PRAGMAs and busy timeout."""
         conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        # Enable Write-Ahead Logging for high concurrency and resilience
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA synchronous = NORMAL;")
@@ -105,9 +157,57 @@ class DatabaseManager:
                 logger.warning(f"Reset {reset_count} stalled tasks back to 'PENDING'.")
             return reset_count
 
-    def enqueue_batch(self, items: List[Dict[str, str]]) -> Tuple[int, int]:
+    def enqueue_one(self, url: str, title: Optional[str] = None, media_type: str = "video") -> Tuple[bool, Optional[int]]:
         """
-        Atomically enqueues a batch of video items with deduplication.
+        Enqueues a single item with normalization, strict video validation, and deduplication.
+        Returns: (is_new: bool, task_id: Optional[int])
+        """
+        if not url or not isinstance(url, str) or not url.strip():
+            return False, None
+
+        canonical_url = normalize_media_url(url)
+        media_type = (media_type or "video").lower()
+
+        # Reject static images by default unless media_type == 'image' or 'all'
+        if media_type == "video" and is_image_url(canonical_url):
+            logger.warning(f"Rejected image URL in video scraping mode: {canonical_url}")
+            return False, None
+
+        item_title = (title or "").strip() or canonical_url.split("/")[-1] or "Untitled Media"
+
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                INSERT OR IGNORE INTO queue (video_url, title, status, created_at, updated_at)
+                VALUES (?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+            """, (canonical_url, item_title))
+
+            if cursor.rowcount > 0:
+                return True, cursor.lastrowid
+            else:
+                cursor.execute("SELECT id FROM queue WHERE video_url = ?;", (canonical_url,))
+                row = cursor.fetchone()
+                task_id = row["id"] if row else None
+                return False, task_id
+
+    def get_task(self, video_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieves a single task by its integer primary key ID."""
+        with self.get_cursor() as cursor:
+            cursor.execute("SELECT * FROM queue WHERE id = ?;", (int(video_id),))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_task_by_url(self, url: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a task by its canonical URL."""
+        canonical_url = normalize_media_url(url)
+        with self.get_cursor() as cursor:
+            cursor.execute("SELECT * FROM queue WHERE video_url = ?;", (canonical_url,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def enqueue_batch(self, items: List[Dict[str, str]], media_type: str = "video") -> Tuple[int, int]:
+        """
+        Atomically enqueues a batch of items with normalization, strict video validation,
+        and database deduplication.
         Returns: (inserted_count, ignored_count)
         """
         if not items:
@@ -115,28 +215,36 @@ class DatabaseManager:
 
         inserted = 0
         ignored = 0
+        media_type = (media_type or "video").lower()
 
         with self.get_cursor() as cursor:
             for item in items:
-                url = item.get("url") or item.get("video_url")
-                if not url or not isinstance(url, str):
+                raw_url = item.get("url") or item.get("video_url")
+                if not raw_url or not isinstance(raw_url, str):
                     continue
-                url = url.strip()
-                if not url:
+
+                canonical_url = normalize_media_url(raw_url)
+                if not canonical_url:
                     continue
-                title = (item.get("title") or "Untitled Video").strip()
+
+                # Strict media type filtering: discard static images in video mode
+                if media_type == "video" and is_image_url(canonical_url):
+                    ignored += 1
+                    continue
+
+                title = (item.get("title") or "Untitled Media").strip()
 
                 cursor.execute("""
                     INSERT OR IGNORE INTO queue (video_url, title, status, created_at, updated_at)
                     VALUES (?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-                """, (url, title))
+                """, (canonical_url, title))
 
                 if cursor.rowcount > 0:
                     inserted += 1
                 else:
                     ignored += 1
 
-        logger.info(f"Enqueued batch: {inserted} added, {ignored} duplicate/ignored.")
+        logger.info(f"Enqueued batch ({media_type} mode): {inserted} added, {ignored} duplicate/image/ignored.")
         return inserted, ignored
 
     def get_next_pending(self) -> Optional[Dict[str, Any]]:

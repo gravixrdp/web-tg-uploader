@@ -1552,18 +1552,25 @@
           <div class="form-group">
             <label class="form-label">Discovery Mode</label>
             <select id="scrape-mode" class="form-select">
-              <option value="auto">Auto (Intelligent Detection)</option>
+              <option value="auto" selected>Auto (Deep Full Videos - Skip 3-5s Previews)</option>
+              <option value="deep">Deep Watch-Page Mode (Extracts Full Video from Detail Pages)</option>
               <option value="sitemap">Sitemap (XML & Sitemaps Index)</option>
               <option value="pagination">Pagination (Page 1..N Crawl)</option>
-              <option value="html5">HTML5 / JS / M3U8 Stream Extractor</option>
+              <option value="html5">HTML5 / JS / M3U8 Direct Stream</option>
               <option value="rss">RSS / Atom / Media Feed</option>
             </select>
           </div>
 
           <div class="form-group">
-            <label class="form-label">Max Pages to Crawl</label>
-            <input type="number" id="scrape-max-pages" class="form-input" value="10" min="1" max="100" />
+            <label class="form-label">Target Video Count</label>
+            <input type="number" id="scrape-max-videos" class="form-input" value="30" min="1" max="500" placeholder="e.g. 30" />
+            <div class="form-hint" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 3px;">Stops crawling when this exact number of full videos is reached.</div>
           </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 10px;">
+          <label class="form-label">Max Pages to Scan</label>
+          <input type="number" id="scrape-max-pages" class="form-input" value="10" min="1" max="100" />
         </div>
       </div>
       <div class="modal-footer">
@@ -2307,6 +2314,7 @@
       const urlInput = document.getElementById('scrape-target-url');
       const modeSelect = document.getElementById('scrape-mode');
       const maxPagesInput = document.getElementById('scrape-max-pages');
+      const maxVideosInput = document.getElementById('scrape-max-videos');
 
       const url = urlInput.value.trim();
       if (!url) {
@@ -2315,17 +2323,21 @@
         return;
       }
 
+      const maxVideos = parseInt(maxVideosInput ? maxVideosInput.value : 30) || 30;
+      const maxPages = parseInt(maxPagesInput ? maxPagesInput.value : 10) || 10;
+
       try {
         const res = await apiRequest('/api/scrape', {
           method: 'POST',
           body: JSON.stringify({
             url: url,
             mode: modeSelect.value,
-            max_pages: parseInt(maxPagesInput.value) || 10
+            max_videos: maxVideos,
+            max_pages: maxPages
           })
         });
 
-        showToast(res.message || 'Scraping job started successfully!', 'success');
+        showToast(res.message || `Scraping initiated for ${maxVideos} full videos!`, 'success');
         closeModal('modal-scrape');
         urlInput.value = '';
         fetchStats();

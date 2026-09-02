@@ -24,11 +24,59 @@ from modules.config import config
 
 logger = logging.getLogger(__name__)
 
-# Video extensions recognized across all crawlers
+# Media extensions recognized across crawlers
 VIDEO_EXTENSIONS = (
     '.mp4', '.mkv', '.webm', '.mov', '.m3u8', '.ts', '.avi',
-    '.flv', '.wmv', '.m4v', '.3gp', '.mpd'
+    '.flv', '.wmv', '.m4v', '.3gp', '.mpd', '.f4v', '.vob', '.ogv'
 )
+
+IMAGE_EXTENSIONS = (
+    '.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.ico',
+    '.bmp', '.tiff', '.avif', '.heic'
+)
+
+# Common tracking and analytics query parameters to strip for strict deduplication
+TRACKING_PARAMS = {
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+    'fbclid', 'gclid', 'msclkid', 'mc_cid', 'mc_eid', 'ref', 'source',
+    '_ga', '_gl', 'yclid', 'zanpid'
+}
+
+
+def normalize_media_url(url: str) -> str:
+    """
+    Canonicalizes a media URL for 100% airtight deduplication:
+    - Strips whitespace, quotes, and HTML entities
+    - Lowercases scheme and netloc
+    - Strips URL fragments (#...)
+    - Strips tracking / analytics query parameters (utm_*, fbclid, etc.)
+    - Removes trailing slashes on path
+    """
+    if not url:
+        return ""
+    url = url.strip().strip("'\"").replace("&amp;", "&")
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return url
+
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+
+        # Clean query parameters
+        from urllib.parse import parse_qsl, urlencode
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=False)
+        cleaned_pairs = [(k, v) for k, v in query_pairs if k.lower() not in TRACKING_PARAMS]
+        clean_query = urlencode(cleaned_pairs)
+
+        clean_path = parsed.path.rstrip('/') if parsed.path != '/' else '/'
+
+        rebuilt = f"{scheme}://{netloc}{clean_path}"
+        if clean_query:
+            rebuilt = f"{rebuilt}?{clean_query}"
+        return rebuilt
+    except Exception:
+        return url.strip()
 
 # Pool of modern, diverse User-Agent strings for anti-ban rotation
 USER_AGENTS = [
@@ -245,6 +293,27 @@ class BaseCrawler:
         parsed = urlparse(url.lower())
         clean_path = parsed.path.rstrip('/')
         return clean_path.endswith(VIDEO_EXTENSIONS)
+
+    def is_image_url(self, url: str) -> bool:
+        """Check if URL path ends with a static image extension."""
+        parsed = urlparse(url.lower())
+        clean_path = parsed.path.rstrip('/')
+        return clean_path.endswith(IMAGE_EXTENSIONS)
+
+    def is_media_match(self, url: str, media_type: str = "video") -> bool:
+        """
+        Strictly filters media URLs based on media type:
+        - 'video' (DEFAULT): accepts only video files (.mp4, .mkv, .m3u8, etc.), strictly rejects images.
+        - 'image': accepts only image files (.jpg, .png, .webp, etc.).
+        - 'all': accepts both video and image files.
+        """
+        media_type = (media_type or "video").lower()
+        if media_type == "image":
+            return self.is_image_url(url)
+        elif media_type == "all":
+            return self.is_video_url(url) or self.is_image_url(url)
+        # Default: Video ONLY (Strictly exclude static images)
+        return self.is_video_url(url) and not self.is_image_url(url)
 
     async def fetch_text(
         self,
@@ -823,15 +892,207 @@ class HTML5Extractor(BaseCrawler):
         return results
 
 
+PREVIEW_KEYWORDS = (
+    'preview', 'trailer', 'teaser', 'hover', 'sample', 'thumb_preview',
+    'short_clip', 'mouseover', '_preview', '-preview', '_sample', '-sample',
+    'preview.mp4', 'hover.mp4', 'trailer.mp4', 'preview.m3u8'
+)
+
+
+def is_preview_or_teaser(url: str, text: str = "") -> bool:
+    """
+    Detects if a media URL or HTML element text represents a short 3-5s teaser/hover preview.
+    Returns True if preview/trailer/sample is detected, False otherwise.
+    """
+    combined = f"{url} {text}".lower()
+    for kw in PREVIEW_KEYWORDS:
+        if kw in combined:
+            return True
+    return False
+
+
+DETAIL_LINK_REGEX = re.compile(
+    r'/(?:video|watch|v|view|post|media|play|item|detail|movie|clip|embed)/[^\s"\'<>]+',
+    re.IGNORECASE
+)
+
+
+class DeepDetailCrawler(BaseCrawler):
+    """
+    Intelligent Deep Video Crawler:
+    1. Scans listing/category/search/gallery pages for individual video watch/detail page links.
+    2. Follows each watch page to extract the REAL full-length video stream (or provides the watch URL for yt-dlp).
+    3. Strictly ignores 3-5s hover previews and teaser trailers.
+    4. Exactly caps output at max_videos (e.g., 30 videos).
+    """
+
+    async def crawl(
+        self,
+        target_url: str,
+        max_videos: int = 30,
+        max_pages: int = 10,
+        session: Optional[aiohttp.ClientSession] = None
+    ) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        seen_urls: Set[str] = set()
+        seen_detail_urls: Set[str] = set()
+        close_session = False
+
+        if session is None:
+            session = aiohttp.ClientSession()
+            close_session = True
+
+        try:
+            logger.info(f"DeepDetailCrawler started for {target_url} (target: {max_videos} full videos, max_pages: {max_pages})")
+            html_extractor = HTML5Extractor(headers=self.custom_headers, delay=self.delay, jitter=self.jitter)
+
+            for page in range(1, max_pages + 1):
+                if len(results) >= max_videos:
+                    break
+
+                page_url = target_url
+                if page > 1:
+                    delimiter = "&" if "?" in target_url else "?"
+                    page_url = f"{target_url}{delimiter}page={page}"
+
+                logger.info(f"Scanning listing page {page}: {page_url}")
+                html_text = await self.fetch_text(session, page_url)
+                if not html_text:
+                    break
+
+                soup = BeautifulSoup(html_text, "html.parser")
+                base_domain = urlparse(target_url).netloc
+
+                # Extract candidate watch/detail links
+                detail_links: List[Tuple[str, str, Optional[str]]] = []
+                for a_tag in soup.find_all("a", href=True):
+                    href = a_tag["href"].strip()
+                    if not href or href.startswith(("#", "javascript:", "mailto:")):
+                        continue
+
+                    full_link = urljoin(page_url, href)
+                    parsed_link = urlparse(full_link)
+
+                    # Only follow links on the same domain or known video embeds
+                    if parsed_link.netloc and parsed_link.netloc != base_domain and "embed" not in full_link:
+                        continue
+
+                    # Filter out static files or obvious non-detail pages
+                    if full_link.lower().endswith(('.jpg', '.png', '.css', '.js', '.svg', '.webp')):
+                        continue
+
+                    # Check if href or text looks like a video detail/watch page
+                    is_detail = bool(DETAIL_LINK_REGEX.search(parsed_link.path)) or any(
+                        p in full_link.lower() for p in ['/video/', '/watch', '/v/', '/view/', '/post/', '/item/', '/play/']
+                    )
+
+                    # Also check parent container classes
+                    parent = a_tag.find_parent()
+                    parent_classes = " ".join(parent.get("class", [])) if parent and parent.get("class") else ""
+                    if any(c in parent_classes.lower() for c in ["video", "item", "card", "thumb", "movie"]):
+                        is_detail = True
+
+                    if is_detail:
+                        canonical_detail = normalize_media_url(full_link)
+                        if canonical_detail not in seen_detail_urls and canonical_detail != normalize_media_url(target_url):
+                            seen_detail_urls.add(canonical_detail)
+
+                            # Extract title
+                            title = a_tag.get_text(strip=True) or a_tag.get("title")
+                            img = a_tag.find("img")
+                            if not title and img:
+                                title = img.get("alt") or img.get("title")
+                            if not title:
+                                title = full_link.rstrip("/").split("/")[-1].replace("-", " ").replace("_", " ")
+
+                            thumb = None
+                            if img:
+                                thumb = img.get("src") or img.get("data-src")
+                                if thumb:
+                                    thumb = urljoin(page_url, thumb)
+
+                            detail_links.append((full_link, title, thumb))
+
+                logger.info(f"Page {page}: Discovered {len(detail_links)} candidate video detail pages.")
+
+                if not detail_links and page == 1:
+                    # If page 1 has no separate detail links, inspect page directly for full player stream
+                    logger.info("No separate detail links found; inspecting single page for full player stream...")
+                    single_streams = await html_extractor.extract(target_url, session=session)
+                    for stream in single_streams:
+                        if not is_preview_or_teaser(stream["url"]):
+                            results.append(stream)
+                            if len(results) >= max_videos:
+                                break
+                    break
+
+                # Visit each detail page to extract the real full video stream
+                for detail_url, detail_title, thumb in detail_links:
+                    if len(results) >= max_videos:
+                        logger.info(f"Reached target count of {max_videos} videos. Stopping deep crawl.")
+                        break
+
+                    logger.info(f"Inspecting detail page #{len(results)+1}/{max_videos}: {detail_url}")
+                    detail_streams = await html_extractor.extract(detail_url, session=session)
+
+                    # Filter out any preview/teaser clips
+                    real_streams = [
+                        s for s in detail_streams 
+                        if not is_preview_or_teaser(s["url"], s.get("title", ""))
+                    ]
+
+                    if real_streams:
+                        # Pick best quality stream
+                        best_stream = real_streams[0]
+                        stream_url = best_stream["url"]
+                        if stream_url not in seen_urls:
+                            seen_urls.add(stream_url)
+                            res = best_stream.get("resolution") or extract_resolution_hint(detail_title, stream_url)
+                            clean_title = detail_title
+                            if res and res.lower() not in clean_title.lower():
+                                clean_title = f"{clean_title} [{res}]"
+
+                            item: Dict[str, Any] = {
+                                "url": stream_url,
+                                "title": clean_title,
+                                "source_page": detail_url
+                            }
+                            if res:
+                                item["resolution"] = res
+                            if thumb:
+                                item["thumbnail"] = thumb
+                            results.append(item)
+                            logger.info(f"Extracted FULL video #{len(results)}: {clean_title} -> {stream_url[:80]}...")
+                    else:
+                        # Fallback: pass the detail page URL itself for yt-dlp to extract
+                        if detail_url not in seen_urls:
+                            seen_urls.add(detail_url)
+                            results.append({
+                                "url": detail_url,
+                                "title": detail_title,
+                                "source_page": detail_url,
+                                "thumbnail": thumb
+                            })
+                            logger.info(f"Queued detail watch page #{len(results)} for yt-dlp: {detail_title} ({detail_url})")
+
+        finally:
+            if close_session:
+                await session.close()
+
+        logger.info(f"DeepDetailCrawler finished: Collected {len(results)} full video items (requested: {max_videos}).")
+        return results[:max_videos]
+
+
 class UniversalCrawler:
     """
     Unified entry point for scraping media links across all supported strategies.
     Supports:
+    - 'deep' / 'watch' / 'full': Deep crawl following video links to extract full videos (skipping previews)
     - 'rss' / 'atom' / 'feed': Parse RSS/Atom video feeds
     - 'sitemap': Parse XML sitemaps and video sitemaps
     - 'pagination': Crawl paginated index pages
     - 'html5': Parse embedded HTML5 media & direct M3U8/MP4 streams
-    - 'auto': Intelligently detect content type and run matching crawler strategies
+    - 'auto': Intelligently detect content type and run matching crawler strategies with deep crawl fallback
     """
 
     def __init__(
@@ -844,20 +1105,22 @@ class UniversalCrawler:
         self.sitemap_crawler = SitemapCrawler(headers=headers, delay=delay, jitter=jitter)
         self.pagination_crawler = PaginationCrawler(headers=headers, delay=delay, jitter=jitter)
         self.html5_extractor = HTML5Extractor(headers=headers, delay=delay, jitter=jitter)
+        self.deep_crawler = DeepDetailCrawler(headers=headers, delay=delay, jitter=jitter)
 
     async def discover(
         self,
         target_url: str,
         mode: str = "auto",
         max_pages: int = 10,
+        max_videos: int = 30,
         session: Optional[aiohttp.ClientSession] = None
     ) -> List[Dict[str, Any]]:
         """
-        Discovers video items from the target URL according to the specified mode.
+        Discovers full video items from target URL, skipping 3-5s previews and stopping at max_videos.
         """
         target_url = target_url.strip()
         mode = mode.strip().lower()
-        logger.info(f"Starting discovery for target: {target_url} (mode: {mode})")
+        logger.info(f"Starting discovery for target: {target_url} (mode: {mode}, max_videos: {max_videos}, max_pages: {max_pages})")
 
         close_session = False
         if session is None:
@@ -865,24 +1128,32 @@ class UniversalCrawler:
             close_session = True
 
         try:
-            # 1. Explicit RSS / Atom / Feed mode
+            # 1. Explicit Deep / Full Video mode
+            if mode in ("deep", "watch", "full"):
+                return await self.deep_crawler.crawl(target_url, max_videos=max_videos, max_pages=max_pages, session=session)
+
+            # 2. Explicit RSS / Atom / Feed mode
             if mode in ("rss", "atom", "feed"):
-                return await self.rss_crawler.crawl(target_url, session=session)
+                items = await self.rss_crawler.crawl(target_url, session=session)
+                return items[:max_videos]
 
-            # 2. Explicit Sitemap mode
+            # 3. Explicit Sitemap mode
             if mode == "sitemap":
-                return await self.sitemap_crawler.crawl(target_url, session=session)
+                items = await self.sitemap_crawler.crawl(target_url, session=session)
+                return items[:max_videos]
 
-            # 3. Explicit Pagination mode
+            # 4. Explicit Pagination mode
             if mode == "pagination":
-                return await self.pagination_crawler.crawl(target_url, max_pages=max_pages, session=session)
+                items = await self.pagination_crawler.crawl(target_url, max_pages=max_pages, session=session)
+                return items[:max_videos]
 
-            # 4. Explicit HTML5 mode
+            # 5. Explicit HTML5 mode
             if mode == "html5":
-                return await self.html5_extractor.extract(target_url, session=session)
+                items = await self.html5_extractor.extract(target_url, session=session)
+                return [s for s in items if not is_preview_or_teaser(s["url"])][:max_videos]
 
-            # 5. AUTO mode: Intelligent detection
-            return await self._discover_auto(target_url, max_pages=max_pages, session=session)
+            # 6. AUTO mode: Intelligent detection with deep full video extraction
+            return await self._discover_auto(target_url, max_pages=max_pages, max_videos=max_videos, session=session)
 
         finally:
             if close_session:
@@ -892,15 +1163,16 @@ class UniversalCrawler:
         self,
         target_url: str,
         max_pages: int = 10,
+        max_videos: int = 30,
         session: Optional[aiohttp.ClientSession] = None
     ) -> List[Dict[str, Any]]:
         """
         Automatic multi-strategy discovery:
         1. Checks URL patterns for RSS / Atom / Sitemap.
         2. Inspects content for XML schemas (RSS, Atom, Sitemap).
-        3. If HTML, extracts HTML5 & direct M3U8/stream links.
+        3. If HTML gallery/listing page, runs DeepDetailCrawler to extract REAL full-length videos.
         4. Detects RSS/Atom <link rel="alternate"> in HTML head.
-        5. Falls back to Pagination crawling if needed.
+        5. Enforces max_videos limit (e.g. 30).
         """
         lower_url = target_url.lower()
 
@@ -908,13 +1180,13 @@ class UniversalCrawler:
         if "sitemap" in lower_url and lower_url.endswith((".xml", ".xml.gz")):
             sitemap_items = await self.sitemap_crawler.crawl(target_url, session=session)
             if sitemap_items:
-                return sitemap_items
+                return sitemap_items[:max_videos]
 
         # Step B: Check if URL clearly points to an RSS / Atom feed
         if lower_url.endswith((".rss", ".atom", "/feed", "/rss", "/feed.xml", "/rss.xml", "/atom.xml")):
             feed_items = await self.rss_crawler.crawl(target_url, session=session)
             if feed_items:
-                return feed_items
+                return feed_items[:max_videos]
 
         # Step C: Fetch initial content to inspect headers and body structure
         content = await self.html5_extractor.fetch_text(session, target_url)
@@ -928,27 +1200,35 @@ class UniversalCrawler:
         if "<?xml" in trimmed or "<rss" in trimmed or "<feed" in trimmed or "<urlset" in trimmed or "<sitemapindex" in trimmed:
             if "<urlset" in trimmed or "<sitemapindex" in trimmed:
                 logger.info("Auto-detected XML Sitemap content.")
-                return await self.sitemap_crawler.crawl(target_url, session=session)
+                items = await self.sitemap_crawler.crawl(target_url, session=session)
+                return items[:max_videos]
             elif "<rss" in trimmed or "<feed" in trimmed or "<channel" in trimmed:
                 logger.info("Auto-detected RSS/Atom XML feed content.")
-                return self.rss_crawler.parse_feed_content(content, target_url)
+                items = self.rss_crawler.parse_feed_content(content, target_url)
+                return items[:max_videos]
 
-        # Step D: HTML Page - Extract direct HTML5 video & stream links
-        soup = BeautifulSoup(content, "html.parser")
-        html_items = await self.html5_extractor.extract(target_url, session=session)
-        if html_items:
-            logger.info(f"Discovered {len(html_items)} items via HTML5/Stream extraction.")
-            return html_items
+        # Step D: Deep Video Detail Crawl (Default for all video websites & galleries)
+        logger.info(f"Running DeepDetailCrawler to discover and extract {max_videos} full-length videos from {target_url}...")
+        deep_items = await self.deep_crawler.crawl(target_url, max_videos=max_videos, max_pages=max_pages, session=session)
+        if deep_items:
+            logger.info(f"DeepDetailCrawler successfully collected {len(deep_items)} full video items.")
+            return deep_items[:max_videos]
 
         # Step E: Check if the HTML page advertises an alternate RSS/Atom feed in <head>
+        soup = BeautifulSoup(content, "html.parser")
         feed_links = self.html5_extractor.extract_feed_links(soup, target_url)
         for feed_link in feed_links:
             logger.info(f"Auto-discovered alternate feed in HTML: {feed_link}")
             feed_items = await self.rss_crawler.crawl(feed_link, session=session)
             if feed_items:
-                return feed_items
+                return feed_items[:max_videos]
 
-        # Step F: Fallback to Pagination scan
-        logger.info(f"No direct stream or feed found. Attempting pagination discovery on {target_url}...")
-        return await self.pagination_crawler.crawl(target_url, max_pages=max_pages, session=session)
+        # Step F: Direct single-page HTML5 stream fallback (excluding previews)
+        html_items = await self.html5_extractor.extract(target_url, session=session)
+        real_html_items = [s for s in html_items if not is_preview_or_teaser(s["url"])]
+        if real_html_items:
+            logger.info(f"Discovered {len(real_html_items)} items via direct HTML5 extraction.")
+            return real_html_items[:max_videos]
+
+        return []
 

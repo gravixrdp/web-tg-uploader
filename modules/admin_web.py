@@ -311,10 +311,11 @@ async def handle_create_task(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": "Valid URL (http/https) is required"}, status=400)
 
     title = (body.get("title") or "").strip() or None
-    inserted, task_id = db_manager.enqueue_one(url, title=title)
+    media_type = (body.get("media_type") or "video").strip().lower()
+    inserted, task_id = db_manager.enqueue_one(url, title=title, media_type=media_type)
 
     if inserted:
-        logger.info(f"Task #{task_id} manually enqueued: {url}")
+        logger.info(f"Task #{task_id} manually enqueued: {url} (media_type: {media_type})")
         return web.json_response({
             "status": "ok",
             "message": f"Task #{task_id} successfully added to queue",
@@ -324,10 +325,10 @@ async def handle_create_task(request: web.Request) -> web.Response:
             "inserted": True
         }, status=201)
     else:
-        logger.info(f"URL already in queue as Task #{task_id}: {url}")
+        logger.info(f"URL rejected/already in queue as Task #{task_id}: {url}")
         return web.json_response({
             "status": "ok",
-            "message": f"URL already exists in queue as Task #{task_id}",
+            "message": f"URL already exists or skipped (media_type: {media_type})",
             "id": task_id,
             "task_id": task_id,
             "is_new": False,
@@ -411,7 +412,7 @@ async def handle_reset_stalled_queue(request: web.Request) -> web.Response:
     count = db_manager.reset_stalled_tasks()
     return web.json_response({
         "status": "ok",
-        "message": f"Reset {count} stranded task(s) back to PENDING",
+        "message": f"Reset {count} stalled task(s) back to PENDING",
         "reset_count": count
     })
 
@@ -448,17 +449,20 @@ async def handle_clear_queue(request: web.Request) -> web.Response:
     })
 
 
-async def _background_scrape_job(url: str, mode: str, max_pages: int) -> None:
+VALID_CRAWL_MODES = {"auto", "deep", "watch", "full", "sitemap", "pagination", "html5", "rss", "atom", "feed"}
+
+
+async def _background_scrape_job(url: str, mode: str, max_pages: int, max_videos: int = 30, media_type: str = "video") -> None:
     """Executes a scraper discovery job in the background and enqueues found items."""
     admin_state.set_crawler_job(url, mode, status="running")
-    logger.info(f"Background scrape job started: URL={url}, Mode={mode}, MaxPages={max_pages}")
+    logger.info(f"Background scrape job started: URL={url}, Mode={mode}, MaxVideos={max_videos}, MaxPages={max_pages}, MediaType={media_type}")
     crawler = UniversalCrawler()
     try:
-        items = await crawler.discover(url, mode=mode, max_pages=max_pages)
+        items = await crawler.discover(url, mode=mode, max_pages=max_pages, max_videos=max_videos)
         if items:
-            inserted, ignored = db_manager.enqueue_batch(items)
+            inserted, ignored = db_manager.enqueue_batch(items, media_type=media_type)
             admin_state.set_crawler_job(url, mode, status="completed", discovered=len(items), enqueued=inserted)
-            logger.info(f"Background scrape job finished for {url}: {len(items)} found, {inserted} enqueued, {ignored} duplicates skipped.")
+            logger.info(f"Background scrape job finished for {url}: {len(items)} found, {inserted} enqueued, {ignored} duplicates/images skipped.")
         else:
             admin_state.set_crawler_job(url, mode, status="completed", discovered=0, enqueued=0)
             logger.warning(f"Background scrape job for {url} completed with 0 items.")
@@ -491,17 +495,26 @@ async def handle_scrape(request: web.Request) -> web.Response:
     except ValueError:
         max_pages = 10
 
+    try:
+        max_videos = max(1, min(500, int(body.get("max_videos", body.get("count", 30)))))
+    except ValueError:
+        max_videos = 30
+
+    media_type = (body.get("media_type") or "video").strip().lower()
+
     # Launch background crawler task
-    task = asyncio.create_task(_background_scrape_job(url, mode, max_pages))
+    task = asyncio.create_task(_background_scrape_job(url, mode, max_pages, max_videos=max_videos, media_type=media_type))
     admin_state.active_scrape_tasks.append(task)
     task.add_done_callback(lambda t: admin_state.active_scrape_tasks.remove(t) if t in admin_state.active_scrape_tasks else None)
 
     return web.json_response({
         "status": "ok",
-        "message": f"Discovery crawl initiated in background for {url} (mode: {mode}, max_pages: {max_pages})",
+        "message": f"Discovery crawl initiated in background for {url} (mode: {mode}, target: {max_videos} videos, max_pages: {max_pages})",
         "job": {
             "url": url,
             "mode": mode,
+            "media_type": media_type,
+            "max_videos": max_videos,
             "max_pages": max_pages,
             "status": "queued"
         }
