@@ -65,6 +65,21 @@ def normalize_media_url(url: str) -> str:
         return url.strip()
 
 
+def normalize_title(title: str) -> str:
+    """Normalize video title for deduplication (strip duration, stats, punctuation)."""
+    if not title:
+        return ""
+    import re
+    # Remove duration hints like [15 min], (12 min), etc.
+    t = re.sub(r'\[\s*\d+\s*(?:min|sec|m|s)\s*\]', '', title, flags=re.IGNORECASE)
+    t = re.sub(r'\(\s*\d+\s*(?:min|sec|m|s)\s*\)', '', t, flags=re.IGNORECASE)
+    # Remove stats prefixes like 12 min8.8K67%
+    t = re.sub(r'^\s*\d+\s*(?:min|sec)\s*[\d.]+[KkMm]?\s*\d+%', '', t)
+    # Keep only alphanumeric characters and single spaces
+    t = re.sub(r'[^a-zA-Z0-9\s]', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip().lower()
+
+
 def is_image_url(url: str) -> bool:
     """Check if URL points to a static image file."""
     from urllib.parse import urlparse
@@ -234,6 +249,16 @@ class DatabaseManager:
 
                 title = (item.get("title") or "Untitled Media").strip()
 
+                # Deduplication: check if already in queue by URL or Title
+                cursor.execute("""
+                    SELECT id FROM queue
+                    WHERE video_url = ?
+                       OR (title = ? AND title != 'Untitled Media');
+                """, (canonical_url, title))
+                if cursor.fetchone():
+                    ignored += 1
+                    continue
+
                 cursor.execute("""
                     INSERT OR IGNORE INTO queue (video_url, title, status, created_at, updated_at)
                     VALUES (?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
@@ -246,6 +271,28 @@ class DatabaseManager:
 
         logger.info(f"Enqueued batch ({media_type} mode): {inserted} added, {ignored} duplicate/image/ignored.")
         return inserted, ignored
+
+    def is_duplicate_completed(self, video_id: int, title: str, video_url: str) -> bool:
+        """Checks if another task with identical title or canonical URL was already COMPLETED."""
+        clean_url = normalize_media_url(video_url)
+        clean_t = normalize_title(title)
+        with self.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id FROM queue
+                WHERE id != ? AND status = 'COMPLETED' AND video_url = ?;
+            """, (int(video_id), clean_url))
+            if cursor.fetchone():
+                return True
+
+            if clean_t and clean_t not in ("untitled media", "video", ""):
+                cursor.execute("""
+                    SELECT id, title FROM queue
+                    WHERE id != ? AND status = 'COMPLETED';
+                """, (int(video_id),))
+                for row in cursor.fetchall():
+                    if normalize_title(row["title"]) == clean_t:
+                        return True
+        return False
 
     def get_next_pending(self) -> Optional[Dict[str, Any]]:
         """

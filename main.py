@@ -185,6 +185,12 @@ async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
         logger.info(f"URL: {video_url}")
         logger.info("========================================================")
 
+        # Deduplication safeguard: skip if identical video was already uploaded previously
+        if db_manager.is_duplicate_completed(video_id, title, video_url):
+            logger.info(f"Task #{video_id} ('{title}') was already uploaded previously. Skipping duplicate.")
+            db_manager.set_status(video_id, "COMPLETED")
+            continue
+
         file_path = None
         set_current_task(video_id, video_url, title, stage="DOWNLOADING")
         try:
