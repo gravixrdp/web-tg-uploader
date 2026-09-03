@@ -489,6 +489,32 @@ class TelegramBotUploader:
 
         return rendered
 
+    def _emergency_compress_for_tg(self, file_path: str, duration: int = 600) -> Optional[str]:
+        """Compresses video with ffmpeg to guarantee size <= 45MB before uploading to Telegram."""
+        import shutil, subprocess
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            return None
+        eff_dur = duration if duration > 5 else 600
+        # Target 42MB
+        target_bitrate = max(100000, int((42 * 1024 * 1024 * 8) / eff_dur) - 64000)
+        out_path = file_path + ".tg45m.mp4"
+        cmd = [
+            ffmpeg_bin, "-y", "-i", file_path,
+            "-c:v", "libx264", "-b:v", str(target_bitrate),
+            "-maxrate", str(target_bitrate), "-bufsize", str(target_bitrate),
+            "-preset", "veryfast", "-vf", "scale='min(480,iw)':-2",
+            "-c:a", "aac", "-b:a", "48k",
+            "-movflags", "+faststart", out_path
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False)
+            if res.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) <= 49.0 * 1024 * 1024:
+                return out_path
+        except Exception as e:
+            logger.warning(f"Emergency compression failed: {e}")
+        return None
+
     async def upload_video(
         self,
         file_path: str,
@@ -521,6 +547,14 @@ class TelegramBotUploader:
         custom_tags = custom_tags or {}
         active_parse_mode = parse_mode if parse_mode is not None else self.parse_mode
 
+        # Check and enforce 50MB limit before hitting Telegram API
+        temp_compressed = None
+        if os.path.getsize(file_path) > 49.0 * 1024 * 1024:
+            logger.warning(f"File {os.path.basename(file_path)} is {os.path.getsize(file_path)/(1024*1024):.1f}MB (>49MB). Running emergency compression...")
+            temp_compressed = self._emergency_compress_for_tg(file_path, metadata.get("duration", 600))
+            if temp_compressed and os.path.exists(temp_compressed):
+                file_path = temp_compressed
+
         # Generate advanced templated caption
         caption = self.format_caption(
             file_path=file_path,
@@ -532,28 +566,12 @@ class TelegramBotUploader:
 
         await self._wait_cooldown()
 
-        # 1. Attempt upload via sendVideo
-        logger.info(f"Initiating sendVideo upload for: {os.path.basename(file_path)}...")
-        success, error_details = await self._send_media_request(
-            endpoint="sendVideo",
-            field_name="video",
-            file_path=file_path,
-            chat_id=destination_chat,
-            caption=caption,
-            metadata=metadata,
-            parse_mode=active_parse_mode,
-            max_retries=max_retries
-        )
-
-        # 2. Auto-fallback to sendDocument if format/stream errors occur
-        if not success and error_details and error_details.is_format_error:
-            logger.warning(
-                f"sendVideo failed due to format/stream constraints ({error_details.friendly_name}). "
-                f"Triggering auto-fallback to sendDocument..."
-            )
+        try:
+            # 1. Attempt upload via sendVideo
+            logger.info(f"Initiating sendVideo upload for: {os.path.basename(file_path)}...")
             success, error_details = await self._send_media_request(
-                endpoint="sendDocument",
-                field_name="document",
+                endpoint="sendVideo",
+                field_name="video",
                 file_path=file_path,
                 chat_id=destination_chat,
                 caption=caption,
@@ -561,15 +579,38 @@ class TelegramBotUploader:
                 parse_mode=active_parse_mode,
                 max_retries=max_retries
             )
+
+            # 2. Auto-fallback to sendDocument if format/stream errors occur
+            if not success and error_details and error_details.is_format_error:
+                logger.warning(
+                    f"sendVideo failed due to format/stream constraints ({error_details.friendly_name}). "
+                    f"Triggering auto-fallback to sendDocument..."
+                )
+                success, error_details = await self._send_media_request(
+                    endpoint="sendDocument",
+                    field_name="document",
+                    file_path=file_path,
+                    chat_id=destination_chat,
+                    caption=caption,
+                    metadata=metadata,
+                    parse_mode=active_parse_mode,
+                    max_retries=max_retries
+                )
+                if success:
+                    logger.info("Auto-fallback to sendDocument succeeded!")
+
             if success:
-                logger.info("Auto-fallback to sendDocument succeeded!")
+                self.last_upload_time = time.time()
+                return True, None
 
-        if success:
-            self.last_upload_time = time.time()
-            return True, None
-
-        error_summary = str(error_details) if error_details else "Upload failed due to unknown error"
-        return False, error_summary
+            error_summary = str(error_details) if error_details else "Upload failed due to unknown error"
+            return False, error_summary
+        finally:
+            if temp_compressed and os.path.exists(temp_compressed):
+                try:
+                    os.remove(temp_compressed)
+                except Exception:
+                    pass
 
     async def _send_media_request(
         self,

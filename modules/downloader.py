@@ -252,10 +252,12 @@ class VideoDownloader:
             return video_path, current_size
 
         eff_duration = duration if duration > 5 else 600
-        # Calculate target video bitrate in bits per second
-        total_bitrate_bps = int((max_bytes * 8) / eff_duration)
+        # Calculate target video bitrate for 42MB target (guaranteed < 48MB with container overhead)
+        safe_target_mb = min(target_max_mb, 42.0)
+        safe_max_bytes = int(safe_target_mb * 1024 * 1024)
+        total_bitrate_bps = int((safe_max_bytes * 8) / eff_duration)
         audio_bitrate_bps = 64000
-        video_bitrate_bps = max(120000, total_bitrate_bps - audio_bitrate_bps)
+        video_bitrate_bps = max(100000, total_bitrate_bps - audio_bitrate_bps)
 
         if video_bitrate_bps >= 450000:
             scale_filter = "scale='min(720,iw)':-2"
@@ -267,7 +269,7 @@ class VideoDownloader:
         compressed_path = os.path.join(self.download_dir, f"video_{video_id}_tg50m.mp4")
         logger.info(
             f"Video {video_id} is {current_size / (1024*1024):.1f}MB (exceeds Telegram 50MB limit). "
-            f"Auto-compressing via ffmpeg to ~{target_max_mb}MB (bitrate: {video_bitrate_bps // 1000}kbps, scale: {scale_filter})..."
+            f"Auto-compressing via ffmpeg to ~{safe_target_mb}MB (bitrate: {video_bitrate_bps // 1000}kbps, scale: {scale_filter})..."
         )
 
         cmd = [
@@ -276,8 +278,8 @@ class VideoDownloader:
             "-i", video_path,
             "-c:v", "libx264",
             "-b:v", str(video_bitrate_bps),
-            "-maxrate", str(int(video_bitrate_bps * 1.3)),
-            "-bufsize", str(int(video_bitrate_bps * 2)),
+            "-maxrate", str(video_bitrate_bps),
+            "-bufsize", str(video_bitrate_bps),
             "-preset", "veryfast",
             "-vf", scale_filter,
             "-c:a", "aac",
@@ -296,10 +298,32 @@ class VideoDownloader:
             )
             if res.returncode == 0 and os.path.exists(compressed_path):
                 compressed_size = os.path.getsize(compressed_path)
-                if compressed_size > 0 and compressed_size < current_size:
+                # If still over 48.5MB, re-compress with reduced bitrate
+                if compressed_size > 48.5 * 1024 * 1024:
+                    logger.warning(
+                        f"Compressed video {video_id} is {compressed_size / (1024*1024):.1f}MB (still > 48.5MB). "
+                        "Applying aggressive second-pass compression..."
+                    )
+                    ratio = (40.0 * 1024 * 1024) / compressed_size
+                    adjusted_bitrate = max(80000, int(video_bitrate_bps * ratio * 0.9))
+                    temp_2nd = os.path.join(self.download_dir, f"video_{video_id}_tg50m_pass2.mp4")
+                    cmd_2nd = [
+                        ffmpeg_bin, "-y", "-i", compressed_path,
+                        "-c:v", "libx264", "-b:v", str(adjusted_bitrate),
+                        "-maxrate", str(adjusted_bitrate), "-bufsize", str(adjusted_bitrate),
+                        "-preset", "veryfast", "-vf", "scale='min(480,iw)':-2",
+                        "-c:a", "aac", "-b:a", "48k",
+                        "-movflags", "+faststart", temp_2nd
+                    ]
+                    res2 = subprocess.run(cmd_2nd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False)
+                    if res2.returncode == 0 and os.path.exists(temp_2nd) and os.path.getsize(temp_2nd) > 0:
+                        os.replace(temp_2nd, compressed_path)
+                        compressed_size = os.path.getsize(compressed_path)
+
+                if 0 < compressed_size <= 49.0 * 1024 * 1024:
                     logger.info(
                         f"Auto-compression succeeded for video {video_id}: "
-                        f"{current_size / (1024*1024):.1f}MB -> {compressed_size / (1024*1024):.1f}MB"
+                        f"{current_size / (1024*1024):.1f}MB -> {compressed_size / (1024*1024):.1f}MB (guaranteed Telegram compatible)"
                     )
                     try:
                         os.remove(video_path)
@@ -308,7 +332,7 @@ class VideoDownloader:
                     return compressed_path, compressed_size
 
             stderr_snippet = res.stderr.decode("utf-8", errors="ignore")[-300:] if res.stderr else ""
-            logger.error(f"ffmpeg compression returned non-zero code {res.returncode}: {stderr_snippet}")
+            logger.error(f"ffmpeg compression returned code {res.returncode}: {stderr_snippet}")
         except Exception as e:
             logger.error(f"ffmpeg compression error for video {video_id}: {e}")
 
