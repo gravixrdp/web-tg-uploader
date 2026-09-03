@@ -450,29 +450,7 @@ class DatabaseManager:
                 stats["TOTAL"] += cnt
         return stats
 
-    def enqueue_one(self, url: str, title: Optional[str] = None) -> Tuple[bool, Optional[int]]:
-        """
-        Enqueues a single URL.
-        Returns: (True, new_id) if inserted, or (False, existing_id) if already exists.
-        """
-        if not url or not isinstance(url, str):
-            return False, None
-        url = url.strip()
-        if not url:
-            return False, None
-        title = (title or "Untitled Video").strip()
-        with self.get_cursor() as cursor:
-            cursor.execute("SELECT id FROM queue WHERE video_url = ?;", (url,))
-            existing = cursor.fetchone()
-            if existing:
-                return False, existing["id"]
 
-            cursor.execute("""
-                INSERT INTO queue (video_url, title, status, created_at, updated_at)
-                VALUES (?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-            """, (url, title))
-            new_id = cursor.lastrowid
-            return True, new_id
 
     def retry_failed(self, task_id: Optional[int] = None) -> int:
         """

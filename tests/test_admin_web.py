@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import asyncio
+import logging
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 from aiohttp import web
@@ -15,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from modules.config import config
 from modules.database import DatabaseManager, db_manager
+from modules.crawler import UniversalCrawler
 from modules.admin_web import (
     create_admin_app,
     start_admin_server,
@@ -401,9 +403,14 @@ async def test_bot_test_ping(temp_db):
             mock_resp.status = 200
             mock_resp.json = AsyncMock(return_value={"ok": True, "result": {"message_id": 999}})
 
+            mock_post_ctx = MagicMock()
+            mock_post_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_post_ctx.__aexit__ = AsyncMock(return_value=None)
+
             mock_session_inst = MagicMock()
-            mock_session_inst.post.return_value.__aenter__.return_value = mock_resp
-            mock_session_inst.post.return_value.__aexit__.return_value = None
+            mock_session_inst.__aenter__ = AsyncMock(return_value=mock_session_inst)
+            mock_session_inst.__aexit__ = AsyncMock(return_value=None)
+            mock_session_inst.post.return_value = mock_post_ctx
 
             with patch("aiohttp.ClientSession", return_value=mock_session_inst):
                 resp = await client.post("/api/bot/test", json={"chat_id": "-1001234567890"})
@@ -426,6 +433,7 @@ async def test_api_logs(temp_db):
     try:
         # Emit some test logs
         test_logger = logging.getLogger("TestLogger")
+        test_logger.setLevel(logging.INFO)
         test_logger.info("Informational message for test")
         test_logger.warning("Warning message for test")
         test_logger.error("Error message for test")

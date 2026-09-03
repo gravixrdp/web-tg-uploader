@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 from modules.config import config, ADMIN_USER_IDS, WEB_PANEL_URL
 from modules.database import DatabaseManager, db_manager
+from modules.crawler import UniversalCrawler
 from modules.bot_admin import (
     TelegramAdminBot,
     PRIMARY_ADMIN_ID,

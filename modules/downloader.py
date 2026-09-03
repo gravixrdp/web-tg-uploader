@@ -14,6 +14,7 @@ import asyncio
 import subprocess
 from typing import Dict, Any, Optional, Tuple
 import yt_dlp
+from modules.crawler import is_preview_or_teaser
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,31 @@ class VideoDownloader:
             self.cleanup_video_files(video_id)
             return None, None, str(e)
 
+    def _find_downloaded_file(self, video_id: int, ydl: Any, info: Dict[str, Any]) -> Optional[str]:
+        """Locates the final downloaded video file on disk."""
+        expected_mp4 = os.path.join(self.download_dir, f"video_{video_id}.mp4")
+        if os.path.isfile(expected_mp4) and os.path.getsize(expected_mp4) > 0:
+            return expected_mp4
+
+        if info and "requested_downloads" in info:
+            for req in info["requested_downloads"]:
+                fp = req.get("filepath")
+                if fp and os.path.isfile(fp) and os.path.getsize(fp) > 0:
+                    return fp
+
+        non_video_exts = (".jpg", ".jpeg", ".webp", ".png", ".part", ".ytdl", ".json", ".temp")
+        dot_prefix = f"video_{video_id}."
+        under_prefix = f"video_{video_id}_"
+
+        if os.path.exists(self.download_dir):
+            for fname in os.listdir(self.download_dir):
+                if (fname.startswith(dot_prefix) or fname.startswith(under_prefix)) and not fname.endswith(non_video_exts):
+                    candidate = os.path.join(self.download_dir, fname)
+                    if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                        return candidate
+
+        return None
+
     def _sync_download(
         self,
         video_id: int,
@@ -273,6 +299,16 @@ class VideoDownloader:
         if not has_space:
             self.cleanup_video_files(video_id)
             return None, None, space_err
+
+        # Auto-detect default origin referer if none was provided
+        if not referer:
+            try:
+                from urllib.parse import urlparse
+                p = urlparse(url)
+                if p.scheme and p.netloc:
+                    referer = f"{p.scheme}://{p.netloc}/"
+            except Exception:
+                pass
 
         output_template = os.path.join(self.download_dir, f"video_{video_id}.%(ext)s")
         expected_mp4 = os.path.join(self.download_dir, f"video_{video_id}.mp4")
@@ -297,37 +333,33 @@ class VideoDownloader:
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                logger.info(f"Extracting info and downloading: {url}")
+                logger.info(f"Extracting info and downloading: {url} (Referer: {referer})")
                 info = ydl.extract_info(url, download=True)
                 if not info:
-                    return None, None, "No video info returned by yt-dlp"
+                    self.cleanup_video_files(video_id)
+                    return None, None, "yt-dlp returned empty info dictionary"
 
-                metadata["title"] = info.get("title") or f"Video {video_id}"
+                # Extract metadata
+                metadata["title"] = info.get("title") or ""
                 metadata["duration"] = int(info.get("duration") or 0)
                 metadata["width"] = int(info.get("width") or 0)
                 metadata["height"] = int(info.get("height") or 0)
 
-                # Locate the final downloaded video file
-                if os.path.isfile(expected_mp4) and os.path.getsize(expected_mp4) > 0:
-                    target_file = expected_mp4
-                else:
-                    # Scan directory for matching file prefix excluding non-video/temp artifacts
-                    non_video_exts = (".jpg", ".jpeg", ".webp", ".png", ".part", ".ytdl", ".json", ".temp")
-                    dot_prefix = f"video_{video_id}."
-                    under_prefix = f"video_{video_id}_"
-
-                    for fname in os.listdir(self.download_dir):
-                        if (fname.startswith(dot_prefix) or fname.startswith(under_prefix)) and not fname.endswith(non_video_exts):
-                            candidate = os.path.join(self.download_dir, fname)
-                            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
-                                target_file = candidate
-                                break
-
+                # Locate downloaded file
+                target_file = self._find_downloaded_file(video_id, ydl, info)
                 if not target_file or not os.path.exists(target_file):
+                    self.cleanup_video_files(video_id)
                     return None, None, "Downloaded file not found on disk"
 
                 file_size = os.path.getsize(target_file)
                 metadata["file_size"] = file_size
+
+                # Strict validation against 3-5s teaser/hover preview files
+                if 0 < metadata["duration"] <= 10 and file_size < 3 * 1024 * 1024:
+                    if is_preview_or_teaser(url, metadata.get("title", "")):
+                        logger.warning(f"Video {video_id} is a short preview/teaser clip ({metadata['duration']}s, {file_size} bytes). Discarding.")
+                        self.cleanup_video_files(video_id)
+                        return None, None, f"Rejected short teaser clip (duration: {metadata['duration']}s, size: {file_size} bytes)"
 
                 # 2. Check for thumbnail produced by yt-dlp
                 thumb_path = self._find_thumbnail(video_id)

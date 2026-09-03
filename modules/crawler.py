@@ -785,36 +785,62 @@ class HTML5Extractor(BaseCrawler):
             soup = BeautifulSoup(html_text, "html.parser")
             page_title = html.unescape(soup.title.get_text(strip=True)) if soup.title else "Untitled Media"
 
-            # 1. Inspect <video> and <audio> tags
+            # 1. Playerjs, KVS Flashvars, and Embedded Player configs (Highest Priority for Full Videos)
+            player_script_patterns = [
+                r'Playerjs\s*\(\s*\{[^}]*[\'"]?file[\'"]?\s*:\s*[\'"]([^\'"]+)[\'"]',
+                r'[\'"]?file[\'"]?\s*:\s*[\'"](/videofile/[^\'"]+)[\'"]',
+                r'[\'"]?video_url[\'"]?\s*:\s*[\'"]([^\'"]+)[\'"]',
+                r'[\'"]?video_alt_url[\'"]?\s*:\s*[\'"]([^\'"]+)[\'"]',
+                r'jwplayer\s*\([^)]*\)\s*\.setup\s*\(\s*\{[^}]*[\'"]?file[\'"]?\s*:\s*[\'"]([^\'"]+)[\'"]',
+            ]
+            for pat in player_script_patterns:
+                for match in re.findall(pat, html_text, re.IGNORECASE):
+                    clean_url = urljoin(page_url, match.strip().replace("\\/", "/"))
+                    if clean_url not in seen_urls and not is_preview_or_teaser(clean_url):
+                        seen_urls.add(clean_url)
+                        res = extract_resolution_hint("", clean_url)
+                        title = f"{page_title} [{res}]" if res and res.lower() not in page_title.lower() else page_title
+                        results.append({
+                            "url": clean_url,
+                            "title": title,
+                            "resolution": res,
+                            "source_page": page_url
+                        })
+
+            # 2. Inspect <video> and <audio> tags
             for v in soup.find_all(["video", "audio"]):
                 src = v.get("src")
                 if src:
                     abs_url = urljoin(page_url, src.strip())
-                    if abs_url not in seen_urls:
+                    if abs_url not in seen_urls and not is_preview_or_teaser(abs_url):
                         seen_urls.add(abs_url)
                         res = extract_resolution_hint(f"{v.get('width', '')}x{v.get('height', '')}", abs_url)
                         title = f"{page_title} [{res}]" if res and res.lower() not in page_title.lower() else page_title
-                        item: Dict[str, Any] = {"url": abs_url, "title": title}
+                        item: Dict[str, Any] = {"url": abs_url, "title": title, "source_page": page_url}
                         if res:
                             item["resolution"] = res
                         results.append(item)
 
-            # 2. Inspect <source> tags
+            # 3. Inspect <source> tags
             for src_tag in soup.find_all("source"):
                 src = src_tag.get("src")
                 src_type = src_tag.get("type", "").lower()
                 if src:
                     abs_url = urljoin(page_url, src.strip())
-                    if abs_url not in seen_urls and (self.is_video_url(abs_url) or "video" in src_type or "m3u8" in abs_url):
+                    if (
+                        abs_url not in seen_urls
+                        and not is_preview_or_teaser(abs_url)
+                        and (self.is_video_url(abs_url) or "video" in src_type or "m3u8" in abs_url)
+                    ):
                         seen_urls.add(abs_url)
                         res = extract_resolution_hint(f"{src_tag.get('size', '')} {src_tag.get('label', '')}", abs_url)
                         title = f"{page_title} [{res}]" if res and res.lower() not in page_title.lower() else page_title
-                        item = {"url": abs_url, "title": title}
+                        item = {"url": abs_url, "title": title, "source_page": page_url}
                         if res:
                             item["resolution"] = res
                         results.append(item)
 
-            # 3. Inspect data-* attributes (e.g. data-src, data-video-url, data-hls, data-m3u8, data-file)
+            # 4. Inspect data-* attributes (e.g. data-src, data-video-url, data-hls, data-m3u8, data-file)
             data_attrs = [
                 "data-src", "data-video", "data-video-url", "data-stream", "data-hls",
                 "data-m3u8", "data-mp4", "data-file", "data-url", "data-stream-url"
@@ -825,16 +851,20 @@ class HTML5Extractor(BaseCrawler):
                     if val and isinstance(val, str):
                         val = val.strip()
                         abs_url = urljoin(page_url, val)
-                        if (self.is_video_url(abs_url) or "m3u8" in abs_url) and abs_url not in seen_urls:
+                        if (
+                            (self.is_video_url(abs_url) or "m3u8" in abs_url)
+                            and abs_url not in seen_urls
+                            and not is_preview_or_teaser(abs_url)
+                        ):
                             seen_urls.add(abs_url)
                             res = extract_resolution_hint(elem.get("data-quality") or elem.get("data-res") or "", abs_url)
                             title = f"{page_title} [{res}]" if res and res.lower() not in page_title.lower() else page_title
-                            item = {"url": abs_url, "title": title}
+                            item = {"url": abs_url, "title": title, "source_page": page_url}
                             if res:
                                 item["resolution"] = res
                             results.append(item)
 
-            # 4. Regex search for direct M3U8, MP4, WEBM, MKV links in HTML / JS code
+            # 5. Regex search for direct M3U8, MP4, WEBM, MKV links in HTML / JS code
             regex_streams = re.findall(
                 r'(https?://[^\s"\'<>]+\.(?:m3u8|mp4|webm|mkv|mov|ts)(?:\?[^\s"\'<>]*)?)',
                 html_text,
@@ -842,16 +872,16 @@ class HTML5Extractor(BaseCrawler):
             )
             for stream_url in regex_streams:
                 clean_url = stream_url.replace("\\/", "/")
-                if clean_url not in seen_urls:
+                if clean_url not in seen_urls and not is_preview_or_teaser(clean_url):
                     seen_urls.add(clean_url)
                     res = extract_resolution_hint("", clean_url)
                     title = f"{page_title} [{res}]" if res and res.lower() not in page_title.lower() else page_title
-                    item = {"url": clean_url, "title": title}
+                    item = {"url": clean_url, "title": title, "source_page": page_url}
                     if res:
                         item["resolution"] = res
                     results.append(item)
 
-            # 5. Extract JavaScript player configurations (JWPlayer, VideoJS, HLS.js, sources arrays)
+            # 6. Extract JavaScript player configurations (JWPlayer, VideoJS, HLS.js, sources arrays)
             js_sources = re.findall(
                 r'(?:file|source|src|hls|streamUrl|videoUrl)\s*:\s*["\'](https?://[^"\']+\.(?:m3u8|mp4|webm)[^"\']*)["\']',
                 html_text,
@@ -859,30 +889,31 @@ class HTML5Extractor(BaseCrawler):
             )
             for js_url in js_sources:
                 clean_url = js_url.replace("\\/", "/")
-                if clean_url not in seen_urls:
+                if clean_url not in seen_urls and not is_preview_or_teaser(clean_url):
                     seen_urls.add(clean_url)
                     res = extract_resolution_hint("", clean_url)
                     title = f"{page_title} [{res}]" if res and res.lower() not in page_title.lower() else page_title
-                    item = {"url": clean_url, "title": title}
+                    item = {"url": clean_url, "title": title, "source_page": page_url}
                     if res:
                         item["resolution"] = res
                     results.append(item)
 
-            # 6. Optionally inspect M3U8 master playlists for variant streams
+            # 7. Optionally inspect M3U8 master playlists for variant streams
             if inspect_m3u8_variants:
                 m3u8_items = [r for r in results if ".m3u8" in r["url"]]
                 for m3u8_item in m3u8_items:
                     variants = await self.inspect_m3u8(session, m3u8_item["url"])
                     for var in variants:
                         var_url = var["url"]
-                        if var_url not in seen_urls:
+                        if var_url not in seen_urls and not is_preview_or_teaser(var_url):
                             seen_urls.add(var_url)
                             var_res = var.get("quality") or var.get("resolution")
                             v_title = f"{page_title} [{var_res}]" if var_res else page_title
                             results.append({
                                 "url": var_url,
                                 "title": v_title,
-                                "resolution": var_res
+                                "resolution": var_res,
+                                "source_page": page_url
                             })
 
         finally:
@@ -895,7 +926,8 @@ class HTML5Extractor(BaseCrawler):
 PREVIEW_KEYWORDS = (
     'preview', 'trailer', 'teaser', 'hover', 'sample', 'thumb_preview',
     'short_clip', 'mouseover', '_preview', '-preview', '_sample', '-sample',
-    'preview.mp4', 'hover.mp4', 'trailer.mp4', 'preview.m3u8'
+    'preview.mp4', 'hover.mp4', 'trailer.mp4', 'preview.m3u8',
+    'fox-images', '/images/videos/', '/thumbs/videos/', '/previews/'
 )
 
 
@@ -908,6 +940,12 @@ def is_preview_or_teaser(url: str, text: str = "") -> bool:
     for kw in PREVIEW_KEYWORDS:
         if kw in combined:
             return True
+    # Mini-clip / hover teaser video file pattern (e.g. /m-athena-faris.mp4)
+    if re.search(r'/m-[a-zA-Z0-9_-]+\.(?:mp4|webm|m3u8)', url, re.I):
+        return True
+    # Substring check for teaser delimiters
+    if re.search(r'(?:[_-]preview|[_-]trailer|[_-]teaser|[_-]sample|[_-]hover)\b', combined, re.I):
+        return True
     return False
 
 
@@ -1004,6 +1042,13 @@ class DeepDetailCrawler(BaseCrawler):
                                 title = img.get("alt") or img.get("title")
                             if not title:
                                 title = full_link.rstrip("/").split("/")[-1].replace("-", " ").replace("_", " ")
+
+                            # Clean out leading stats (e.g. '15 min57K78%Title...')
+                            dur_match = re.match(r'^(\d+\s*(?:min|sec|m|s)?)\s*\d+[KkMmBb]?\s*\d+%\s*(.*)', title, re.IGNORECASE)
+                            if dur_match:
+                                dur_str = dur_match.group(1).strip()
+                                raw_title = dur_match.group(2).strip()
+                                title = f"{raw_title} [{dur_str}]"
 
                             thumb = None
                             if img:
@@ -1229,6 +1274,12 @@ class UniversalCrawler:
         if real_html_items:
             logger.info(f"Discovered {len(real_html_items)} items via direct HTML5 extraction.")
             return real_html_items[:max_videos]
+
+        # Step G: Pagination crawler fallback
+        pagination_items = await self.pagination_crawler.crawl(target_url, max_pages=max_pages, session=session)
+        if pagination_items:
+            logger.info(f"Discovered {len(pagination_items)} items via pagination crawler fallback.")
+            return pagination_items[:max_videos]
 
         return []
 

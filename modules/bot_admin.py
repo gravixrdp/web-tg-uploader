@@ -568,7 +568,7 @@ class TelegramAdminBot:
             else:
                 inserted, ignored = db_manager.enqueue_batch(discovered, media_type="video")
                 res_text = (
-                    f"✅ <b>Deep Scrape Complete!</b>\n\n"
+                    f"✅ <b>Discovery Complete!</b>\n\n"
                     f"• <b>Target:</b> <code>{escape_html(target_url)}</code>\n"
                     f"• <b>Full Videos Found:</b> <code>{len(discovered)}</code>\n"
                     f"• <b>Newly Enqueued:</b> <code>{inserted}</code>\n"
@@ -872,6 +872,8 @@ class TelegramAdminBot:
                                 await self.process_update(update)
                             except Exception as e:
                                 logger.error(f"Error processing update #{update_id}: {e}", exc_info=True)
+                    else:
+                        await asyncio.sleep(0.05)
 
                 except asyncio.CancelledError:
                     break
