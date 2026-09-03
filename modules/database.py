@@ -627,9 +627,15 @@ class DatabaseManager:
         self.set_worker_paused(paused)
 
     def get_active_chat_id(self) -> str:
-        """Returns the database-configured chat ID if present, else fallback to config."""
+        """Returns the database-configured chat ID if present, else fallback to config, then to primary admin ID."""
         val = self.get_setting("chat_id") or self.get_setting("telegram_chat_id")
-        return val.strip() if val and val.strip() else config.TELEGRAM_CHAT_ID
+        if val and val.strip():
+            return val.strip()
+        if config.TELEGRAM_CHAT_ID and config.TELEGRAM_CHAT_ID.strip():
+            return config.TELEGRAM_CHAT_ID.strip()
+        if config.ADMIN_USER_IDS:
+            return str(config.ADMIN_USER_IDS[0])
+        return ""
 
     def set_active_chat_id(self, chat_id: str) -> None:
         """Persists updated target Telegram chat/channel ID in settings."""
