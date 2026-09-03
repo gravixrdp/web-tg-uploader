@@ -186,7 +186,7 @@ async def cors_middleware(request: web.Request, handler):
 
 async def handle_root(request: web.Request) -> web.Response:
     """Root endpoint (GET /) serving Admin Dashboard or JSON for API clients."""
-    accept_header = request.headers.get("Accept", "")
+    accept_header = request.headers.get("Accept", "").lower()
     if "application/json" in accept_header and "text/html" not in accept_header:
         return await handle_health(request)
 
@@ -590,7 +590,15 @@ async def handle_update_settings(request: web.Request) -> web.Response:
         "interval": "interval",
         "MAX_PAGES": "max_pages",
         "max_pages": "max_pages",
-        "worker_paused": "worker_paused"
+        "worker_paused": "worker_paused",
+        "button_url": "button_url",
+        "CHANNEL_BUTTON_URL": "button_url",
+        "button_text": "button_text",
+        "CHANNEL_BUTTON_TEXT": "button_text",
+        "share_text": "share_text",
+        "CHANNEL_SHARE_TEXT": "share_text",
+        "footer_link": "footer_link",
+        "CHANNEL_FOOTER_LINK": "footer_link"
     }
 
     for key, db_key in mapping.items():

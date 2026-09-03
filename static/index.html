@@ -1657,6 +1657,31 @@
           </div>
         </div>
 
+        <!-- Viral Growth & Channel Promotion Section -->
+        <div style="background: rgba(168, 85, 247, 0.05); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: var(--radius-md); padding: 16px; margin-bottom: 20px;">
+          <div style="font-weight: 700; color: #a855f7; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 18px; height: 18px;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+            Viral Channel Growth & Interactive Buttons
+          </div>
+
+          <div class="form-group" style="margin-bottom: 10px;">
+            <label class="form-label">Main Channel Invite Link (Button Link)</label>
+            <input type="url" id="setting-button-url" class="form-input" placeholder="https://t.me/+c6Apt6N_Psk2ZjJl" />
+            <div class="form-hint">Leave blank to disable buttons. When set, an interactive button linking to your channel is attached to every video.</div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Primary Button Label</label>
+              <input type="text" id="setting-button-text" class="form-input" placeholder="📢 Join Main Channel" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Share Button Label</label>
+              <input type="text" id="setting-share-text" class="form-input" placeholder="↗️ Share With Friends" />
+            </div>
+          </div>
+        </div>
+
         <!-- Scrape Target Settings -->
         <div class="form-group">
           <label class="form-label">Default Scrape Target URL</label>
@@ -2388,6 +2413,9 @@
         document.getElementById('setting-crawl-mode').value = data.CRAWL_MODE || 'auto';
         document.getElementById('setting-cooldown').value = data.UPLOAD_COOLDOWN || 20;
         document.getElementById('setting-periodic-interval').value = data.PERIODIC_CRAWL_INTERVAL || 0;
+        document.getElementById('setting-button-url').value = data.button_url || data.CHANNEL_BUTTON_URL || '';
+        document.getElementById('setting-button-text').value = data.button_text || data.CHANNEL_BUTTON_TEXT || '📢 Join Main Channel';
+        document.getElementById('setting-share-text').value = data.share_text || data.CHANNEL_SHARE_TEXT || '↗️ Share With Friends';
       } catch (err) {
         console.warn('Could not load settings:', err);
       }
@@ -2399,7 +2427,10 @@
         CRAWL_TARGET_URL: document.getElementById('setting-target-url').value.trim(),
         CRAWL_MODE: document.getElementById('setting-crawl-mode').value,
         UPLOAD_COOLDOWN: parseInt(document.getElementById('setting-cooldown').value) || 20,
-        PERIODIC_CRAWL_INTERVAL: parseInt(document.getElementById('setting-periodic-interval').value) || 0
+        PERIODIC_CRAWL_INTERVAL: parseInt(document.getElementById('setting-periodic-interval').value) || 0,
+        button_url: document.getElementById('setting-button-url').value.trim(),
+        button_text: document.getElementById('setting-button-text').value.trim(),
+        share_text: document.getElementById('setting-share-text').value.trim()
       };
 
       try {

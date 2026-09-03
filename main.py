@@ -213,13 +213,28 @@ async def run_worker_phase(shutdown_event: asyncio.Event) -> None:
             set_current_task(video_id, video_url, title, stage="UPLOADING", file_size=file_size)
             db_manager.set_status(video_id, "UPLOADING", file_size=file_size)
 
-            # 3. Dynamic target chat ID & upload to Telegram
+            # 3. Dynamic target chat ID, viral growth buttons & upload to Telegram
             target_chat_id = db_manager.get_active_chat_id()
+            growth_settings = db_manager.get_active_growth_settings()
+            button_url = growth_settings.get("button_url")
+            button_text = growth_settings.get("button_text")
+            share_text = growth_settings.get("share_text")
+            footer_link = growth_settings.get("footer_link")
+
+            from modules.uploader import build_growth_reply_markup
+            growth_markup = build_growth_reply_markup(
+                button_url=button_url,
+                button_text=button_text,
+                share_text=share_text
+            ) if button_url else None
+
             upload_success, upload_error = await uploader.upload_video(
                 file_path=file_path,
                 title=title,
                 metadata=metadata,
-                target_chat_id=target_chat_id
+                target_chat_id=target_chat_id,
+                reply_markup=growth_markup,
+                footer_link=footer_link
             )
 
             if upload_success:

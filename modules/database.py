@@ -742,6 +742,19 @@ class DatabaseManager:
         """Persists periodic crawl interval setting in database."""
         self.set_setting("periodic_crawl_interval", str(max(0, int(interval))))
 
+    def get_active_growth_settings(self) -> Dict[str, str]:
+        """Returns active viral channel growth settings (buttons and promotional links)."""
+        button_url = self.get_setting("button_url") or config.CHANNEL_BUTTON_URL
+        button_text = self.get_setting("button_text") or config.CHANNEL_BUTTON_TEXT
+        share_text = self.get_setting("share_text") or config.CHANNEL_SHARE_TEXT
+        footer_link = self.get_setting("footer_link") or config.CHANNEL_FOOTER_LINK
+        return {
+            "button_url": button_url.strip() if button_url else "",
+            "button_text": button_text.strip() if button_text else "📢 Join Main Channel",
+            "share_text": share_text.strip() if share_text else "↗️ Share With Friends",
+            "footer_link": footer_link.strip() if footer_link else ""
+        }
+
     def get_effective_settings(self) -> Dict[str, Any]:
         """
         Returns a dictionary of effective runtime settings with active values and source (db vs env).

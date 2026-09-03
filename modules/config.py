@@ -126,12 +126,18 @@ class Config:
 
     # Telegram Credentials & Administration
     TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: get_env_str("TELEGRAM_BOT_TOKEN", ""))
-    TELEGRAM_CHAT_ID: str = field(default_factory=lambda: get_env_str("TELEGRAM_CHAT_ID", "-1003181550164"))
+    TELEGRAM_CHAT_ID: str = field(default_factory=lambda: get_env_str("TELEGRAM_CHAT_ID", ""))
     TELEGRAM_API_BASE: str = field(default_factory=lambda: get_env_str("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"))
     CAPTION_TEMPLATE: str = field(default_factory=lambda: get_env_str("CAPTION_TEMPLATE", "🎬 <b>{title}</b>"))
     TELEGRAM_PARSE_MODE: str = field(default_factory=lambda: get_env_str("TELEGRAM_PARSE_MODE", "HTML"))
     ADMIN_USER_IDS: List[int] = field(default_factory=lambda: get_env_admin_ids("ADMIN_USER_IDS", "6649712542"))
     WEB_PANEL_URL: str = field(default_factory=lambda: get_env_str("WEB_PANEL_URL", "https://web-tg-uploader-production.up.railway.app"))
+
+    # Viral Channel Growth & Promotional Buttons
+    CHANNEL_BUTTON_URL: str = field(default_factory=lambda: get_env_str("CHANNEL_BUTTON_URL", "https://t.me/+c6Apt6N_Psk2ZjJl"))
+    CHANNEL_BUTTON_TEXT: str = field(default_factory=lambda: get_env_str("CHANNEL_BUTTON_TEXT", "📢 Join Main Channel"))
+    CHANNEL_SHARE_TEXT: str = field(default_factory=lambda: get_env_str("CHANNEL_SHARE_TEXT", "↗️ Share With Friends"))
+    CHANNEL_FOOTER_LINK: str = field(default_factory=lambda: get_env_str("CHANNEL_FOOTER_LINK", ""))
 
 
     # Crawling & Discovery
@@ -289,4 +295,8 @@ CAPTION_TEMPLATE = config.CAPTION_TEMPLATE
 TELEGRAM_PARSE_MODE = config.TELEGRAM_PARSE_MODE
 UPLOAD_COOLDOWN = config.UPLOAD_COOLDOWN
 LOG_LEVEL = config.LOG_LEVEL
+CHANNEL_BUTTON_URL = config.CHANNEL_BUTTON_URL
+CHANNEL_BUTTON_TEXT = config.CHANNEL_BUTTON_TEXT
+CHANNEL_SHARE_TEXT = config.CHANNEL_SHARE_TEXT
+CHANNEL_FOOTER_LINK = config.CHANNEL_FOOTER_LINK
 

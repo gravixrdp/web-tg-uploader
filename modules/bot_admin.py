@@ -165,6 +165,12 @@ def format_help_text() -> str:
         "• <code>/retry</code> — Retry all failed tasks in the queue\n"
         "• <code>/pause</code> — Pause worker downloading and uploading\n"
         "• <code>/resume</code> — Resume worker queue processing\n"
+        "• <code>/setbutton &lt;link&gt; [name]</code> — Set/change main channel button & link\n"
+        "• <code>/setbuttonname &lt;name&gt;</code> — Change button display name\n"
+        "• <code>/setshare &lt;name&gt;</code> — Change share button display name\n"
+        "• <code>/setfooter &lt;link&gt;</code> — Set caption promotional footer link\n"
+        "• <code>/delbutton</code> — Remove buttons from future posts\n"
+        "• <code>/buttons</code> — View current button settings & preview\n"
         "• <code>/web</code> — Get link to the Web Admin Panel\n"
         "• <code>/help</code> — Display this command reference\n"
     )
@@ -381,7 +387,7 @@ class TelegramAdminBot:
         payload = {
             "offset": offset,
             "timeout": timeout,
-            "allowed_updates": ["message", "callback_query"]
+            "allowed_updates": ["message", "callback_query", "my_chat_member", "channel_post"]
         }
         data = await self._api_call("getUpdates", payload, session=session)
         if data and data.get("ok"):
@@ -683,6 +689,137 @@ class TelegramAdminBot:
             reply_markup=reply_markup
         )
 
+    async def handle_setbutton(self, chat_id: int, args_text: str) -> None:
+        """Handles /setbutton <url> [button_name] or /setlink <url>."""
+        parts = args_text.strip().split(maxsplit=1)
+        if not parts:
+            curr = db_manager.get_active_growth_settings()
+            b_url = curr.get("button_url") or "&lt;NOT SET&gt;"
+            b_text = curr.get("button_text") or "📢 Join Main Channel"
+            await self.send_message(
+                chat_id,
+                f"🔗 <b>Current Button Link:</b> <code>{escape_html(b_url)}</code>\n"
+                f"• <b>Button Name:</b> <code>{escape_html(b_text)}</code>\n\n"
+                "<b>Usage:</b> <code>/setbutton &lt;invite_link&gt; [button_name]</code>\n"
+                "<i>Example:</i> <code>/setbutton https://t.me/+c6Apt6N_Psk2ZjJl 📢 Join Main Channel</code>\n"
+                "<i>Or use <code>/delbutton</code> to remove button.</i>"
+            )
+            return
+
+        new_url = parts[0].strip()
+        new_name = parts[1].strip() if len(parts) > 1 else None
+
+        db_manager.set_setting("button_url", new_url)
+        if new_name:
+            db_manager.set_setting("button_text", new_name)
+
+        curr = db_manager.get_active_growth_settings()
+        await self.send_message(
+            chat_id,
+            f"✅ <b>Main Channel Button Updated!</b>\n\n"
+            f"• <b>Button Link:</b> <code>{escape_html(new_url)}</code>\n"
+            f"• <b>Button Name:</b> <code>{escape_html(curr['button_text'])}</code>\n"
+            f"• <b>Share Button:</b> <code>{escape_html(curr['share_text'])}</code>\n\n"
+            "<i>All future videos uploaded to Telegram will carry this interactive button!</i>"
+        )
+
+    async def handle_setbuttonname(self, chat_id: int, args_text: str) -> None:
+        """Handles /setbuttonname <name> to update the label on the primary button."""
+        new_name = args_text.strip()
+        if not new_name:
+            curr = db_manager.get_active_growth_settings()
+            await self.send_message(
+                chat_id,
+                f"🔘 <b>Current Button Name:</b> <code>{escape_html(curr['button_text'])}</code>\n\n"
+                "<b>Usage:</b> <code>/setbuttonname &lt;custom_button_name&gt;</code>\n"
+                "<i>Example:</i> <code>/setbuttonname 🚀 Join VIP Channel</code>"
+            )
+            return
+
+        db_manager.set_setting("button_text", new_name)
+        await self.send_message(
+            chat_id,
+            f"✅ <b>Button Name Updated!</b>\n\n"
+            f"• <b>New Button Name:</b> <code>{escape_html(new_name)}</code>"
+        )
+
+    async def handle_setshare(self, chat_id: int, args_text: str) -> None:
+        """Handles /setshare <text> to update share button label."""
+        new_share = args_text.strip()
+        if not new_share:
+            curr = db_manager.get_active_growth_settings()
+            await self.send_message(
+                chat_id,
+                f"↗️ <b>Current Share Button Label:</b> <code>{escape_html(curr['share_text'])}</code>\n\n"
+                "<b>Usage:</b> <code>/setshare &lt;share_button_label&gt;</code>\n"
+                "<i>Example:</i> <code>/setshare ↗️ Share With Friends</code>"
+            )
+            return
+
+        db_manager.set_setting("share_text", new_share)
+        await self.send_message(
+            chat_id,
+            f"✅ <b>Share Button Label Updated!</b>\n\n"
+            f"• <b>New Share Label:</b> <code>{escape_html(new_share)}</code>"
+        )
+
+    async def handle_setfooter(self, chat_id: int, args_text: str) -> None:
+        """Handles /setfooter <link> to update caption promotional footer."""
+        new_footer = args_text.strip()
+        if not new_footer:
+            curr = db_manager.get_active_growth_settings()
+            f_val = curr.get("footer_link") or "&lt;NOT SET&gt;"
+            await self.send_message(
+                chat_id,
+                f"📝 <b>Current Footer Link:</b> <code>{escape_html(f_val)}</code>\n\n"
+                "<b>Usage:</b> <code>/setfooter &lt;invite_link&gt;</code>\n"
+                "<i>Example:</i> <code>/setfooter https://t.me/+c6Apt6N_Psk2ZjJl</code>"
+            )
+            return
+
+        db_manager.set_setting("footer_link", new_footer)
+        await self.send_message(
+            chat_id,
+            f"✅ <b>Promotional Caption Footer Updated!</b>\n\n"
+            f"• <b>Footer Link:</b> <code>{escape_html(new_footer)}</code>"
+        )
+
+    async def handle_delbutton(self, chat_id: int) -> None:
+        """Handles /delbutton to remove promotional buttons (clean posts)."""
+        db_manager.delete_setting("button_url")
+        await self.send_message(
+            chat_id,
+            "🗑 <b>Channel Buttons Removed!</b>\n\n"
+            "Future video uploads will be posted clean without any inline buttons."
+        )
+
+    async def handle_buttons_view(self, chat_id: int) -> None:
+        """Handles /buttons to inspect active growth buttons and preview layout."""
+        curr = db_manager.get_active_growth_settings()
+        b_url = curr.get("button_url")
+        b_text = curr.get("button_text")
+        s_text = curr.get("share_text")
+
+        from modules.uploader import build_growth_reply_markup
+        preview_markup = build_growth_reply_markup(
+            button_url=b_url,
+            button_text=b_text,
+            share_text=s_text
+        ) if b_url else None
+
+        text = (
+            "🎛 <b>Interactive Channel Button Settings</b>\n\n"
+            f"• <b>Button Link:</b> <code>{escape_html(b_url) if b_url else '&lt;NOT SET&gt;'}</code>\n"
+            f"• <b>Button Label:</b> <code>{escape_html(b_text)}</code>\n"
+            f"• <b>Share Label:</b> <code>{escape_html(s_text)}</code>\n\n"
+            "<b>Commands to manage:</b>\n"
+            "• <code>/setbutton &lt;link&gt; [name]</code> — Update link & name\n"
+            "• <code>/setbuttonname &lt;name&gt;</code> — Update button name\n"
+            "• <code>/setshare &lt;name&gt;</code> — Update share button name\n"
+            "• <code>/delbutton</code> — Remove buttons completely"
+        )
+        await self.send_message(chat_id, text, reply_markup=preview_markup)
+
     async def handle_help(self, chat_id: int) -> None:
         """Handles /help to display command reference."""
         await self.send_message(chat_id, format_help_text())
@@ -694,11 +831,43 @@ class TelegramAdminBot:
     async def process_update(self, update: Dict[str, Any]) -> None:
         """Processes a single incoming Telegram update."""
         # 1. Handle Message Updates
+        # 1. Handle Bot Added as Administrator to Channel
+        my_chat_member = update.get("my_chat_member")
+        if my_chat_member:
+            chat = my_chat_member.get("chat", {})
+            new_member = my_chat_member.get("new_chat_member", {})
+            status = new_member.get("status")
+            if status in ("administrator", "member") and chat.get("id"):
+                c_id = chat.get("id")
+                c_title = chat.get("title", "Channel")
+                logger.info(f"Bot added to channel: '{c_title}' (ID: {c_id})")
+                for admin_id in self.admin_ids:
+                    await self.send_message(
+                        admin_id,
+                        f"🎉 <b>Bot Added to Channel!</b>\n\n"
+                        f"• <b>Title:</b> {escape_html(c_title)}\n"
+                        f"• <b>Channel ID:</b> <code>{c_id}</code>\n\n"
+                        f"<i>To publish videos directly to this channel, send:</i>\n"
+                        f"<code>/setchat {c_id}</code>"
+                    )
+            return
+
+        # 2. Handle Channel Post (e.g. from newly added channel)
+        channel_post = update.get("channel_post")
+        if channel_post:
+            c_chat = channel_post.get("chat", {})
+            if c_chat.get("id"):
+                c_id = c_chat.get("id")
+                c_title = c_chat.get("title", "Channel")
+                logger.info(f"Detected channel activity from '{c_title}' (ID: {c_id})")
+            return
+
+        # 3. Handle Message Updates
         if "message" in update:
             await self._process_message(update["message"])
             return
 
-        # 2. Handle Callback Query Updates
+        # 4. Handle Callback Query Updates
         if "callback_query" in update:
             await self._process_callback_query(update["callback_query"])
             return
@@ -709,6 +878,22 @@ class TelegramAdminBot:
         user_id = from_user.get("id")
         chat_id = message.get("chat", {}).get("id")
         text = (message.get("text") or "").strip()
+
+        # Forward detection: If admin forwards a post from their channel to the bot
+        forward_from_chat = message.get("forward_from_chat")
+        if forward_from_chat and forward_from_chat.get("id") and self.is_authorized(user_id):
+            f_id = forward_from_chat.get("id")
+            f_title = forward_from_chat.get("title", "Channel")
+            db_manager.set_active_chat_id(str(f_id))
+            await self.send_message(
+                chat_id,
+                f"🎉 <b>Channel Auto-Detected!</b>\n\n"
+                f"• <b>Title:</b> {escape_html(f_title)}\n"
+                f"• <b>Channel ID:</b> <code>{f_id}</code>\n\n"
+                f"✅ Destination Chat updated to <code>{f_id}</code>!\n"
+                f"<i>All future videos will be published directly to this channel.</i>"
+            )
+            return
 
         if not chat_id or not text:
             return
@@ -754,6 +939,18 @@ class TelegramAdminBot:
             await self.handle_resume(chat_id)
         elif cmd == "/web":
             await self.handle_web(chat_id)
+        elif cmd in ("/setbutton", "/setlink", "/setinvite"):
+            await self.handle_setbutton(chat_id, args)
+        elif cmd == "/setbuttonname":
+            await self.handle_setbuttonname(chat_id, args)
+        elif cmd == "/setshare":
+            await self.handle_setshare(chat_id, args)
+        elif cmd == "/setfooter":
+            await self.handle_setfooter(chat_id, args)
+        elif cmd == "/delbutton":
+            await self.handle_delbutton(chat_id)
+        elif cmd in ("/buttons", "/button"):
+            await self.handle_buttons_view(chat_id)
         elif cmd == "/help":
             await self.handle_help(chat_id)
         else:

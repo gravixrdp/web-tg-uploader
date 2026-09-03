@@ -42,8 +42,8 @@ async def test_health_check_endpoints():
     await client.start_server()
 
     try:
-        # Test GET /
-        resp = await client.get("/")
+        # Test GET / (with JSON accept header)
+        resp = await client.get("/", headers={"Accept": "application/json"})
         assert resp.status == 200
         data = await resp.json()
         assert data["status"] == "healthy"

@@ -47,6 +47,28 @@ def clean_display_title(title: str) -> str:
     return title.strip()
 
 
+def build_growth_reply_markup(
+    button_url: Optional[str] = None,
+    button_text: str = "📢 Join Main Channel",
+    share_text: str = "↗️ Share With Friends",
+    share_url: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Builds inline keyboard with Join Channel and 1-Click Share buttons."""
+    if not button_url or not str(button_url).strip():
+        return None
+    import urllib.parse
+    b_url = str(button_url).strip()
+    b_text = str(button_text or "📢 Join Main Channel").strip()
+    s_text = str(share_text or "↗️ Share With Friends").strip()
+
+    row = [{"text": b_text, "url": b_url}]
+    target_share = share_url or b_url
+    share_link = f"https://t.me/share/url?url={urllib.parse.quote(target_share)}"
+    row.append({"text": s_text, "url": share_link})
+
+    return {"inline_keyboard": [row]}
+
+
 # ==============================================================================
 # Helper Utilities: Formatting & Sizing
 # ==============================================================================
@@ -433,7 +455,8 @@ class TelegramBotUploader:
         metadata: Optional[Dict[str, Any]] = None,
         custom_tags: Optional[Dict[str, Any]] = None,
         template: Optional[str] = None,
-        max_length: int = TELEGRAM_MAX_CAPTION_LENGTH
+        max_length: int = TELEGRAM_MAX_CAPTION_LENGTH,
+        footer_link: Optional[str] = None
     ) -> str:
         """
         Renders an advanced templated caption supporting {title}, {size}, {duration},
@@ -499,6 +522,10 @@ class TelegramBotUploader:
 
         rendered = rendered.strip()
 
+        # Optional promotional invite link in caption
+        if footer_link and str(footer_link).strip():
+            rendered = f"{rendered}\n\n🔗 Join VIP: {str(footer_link).strip()}"
+
         # Enforce Telegram caption limit (1024 chars for media)
         if len(rendered) > max_length:
             logger.info(f"Caption length ({len(rendered)}) exceeds max ({max_length}). Truncating safely.")
@@ -541,7 +568,9 @@ class TelegramBotUploader:
         max_retries: int = 5,
         custom_tags: Optional[Dict[str, Any]] = None,
         caption_template: Optional[str] = None,
-        parse_mode: Optional[str] = None
+        parse_mode: Optional[str] = None,
+        reply_markup: Optional[Dict[str, Any]] = None,
+        footer_link: Optional[str] = None
     ) -> Tuple[bool, Optional[str]]:
         """
         Uploads a video to the specified Telegram chat/channel with stream chunking,
@@ -578,7 +607,8 @@ class TelegramBotUploader:
             title=title,
             metadata=metadata,
             custom_tags=custom_tags,
-            template=caption_template
+            template=caption_template,
+            footer_link=footer_link
         )
 
         await self._wait_cooldown()
@@ -586,6 +616,10 @@ class TelegramBotUploader:
         try:
             # 1. Attempt upload via sendVideo
             logger.info(f"Initiating sendVideo upload for: {os.path.basename(file_path)}...")
+            extra_kwargs = {}
+            if reply_markup is not None:
+                extra_kwargs["reply_markup"] = reply_markup
+
             success, error_details = await self._send_media_request(
                 endpoint="sendVideo",
                 field_name="video",
@@ -594,7 +628,8 @@ class TelegramBotUploader:
                 caption=caption,
                 metadata=metadata,
                 parse_mode=active_parse_mode,
-                max_retries=max_retries
+                max_retries=max_retries,
+                **extra_kwargs
             )
 
             # 2. Auto-fallback to sendDocument if format/stream errors occur
@@ -611,7 +646,8 @@ class TelegramBotUploader:
                     caption=caption,
                     metadata=metadata,
                     parse_mode=active_parse_mode,
-                    max_retries=max_retries
+                    max_retries=max_retries,
+                    **extra_kwargs
                 )
                 if success:
                     logger.info("Auto-fallback to sendDocument succeeded!")
@@ -638,7 +674,8 @@ class TelegramBotUploader:
         caption: str,
         metadata: Dict[str, Any],
         parse_mode: Optional[str] = None,
-        max_retries: int = 5
+        max_retries: int = 5,
+        reply_markup: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Optional[TelegramErrorDetails]]:
         """
         Executes multipart media upload with dynamic stream chunking, rich error diagnostics,
@@ -661,6 +698,10 @@ class TelegramBotUploader:
                 form_data = aiohttp.FormData()
                 form_data.add_field("chat_id", str(chat_id))
                 form_data.add_field("caption", caption)
+
+                if reply_markup:
+                    import json
+                    form_data.add_field("reply_markup", json.dumps(reply_markup))
 
                 if parse_mode:
                     form_data.add_field("parse_mode", parse_mode)
