@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
-# Install ffmpeg and required utilities for video processing
+# Install ffmpeg, aria2 multi-connection downloader, and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    aria2 \
     ca-certificates \
     curl \
     libmagic1 \

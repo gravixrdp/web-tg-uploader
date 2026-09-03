@@ -98,10 +98,12 @@ class VideoDownloader:
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
-            "retries": 3,
-            "fragment_retries": 3,
-            "concurrent_fragment_downloads": 4,
+            "retries": 5,
+            "fragment_retries": 5,
+            "concurrent_fragment_downloads": 8,
             "continuedl": True,
+            "buffersize": 1024 * 1024,
+            "http_chunk_size": 10485760,
             "socket_timeout": 30,
             "writethumbnail": True,
             "postprocessors": [
@@ -111,6 +113,27 @@ class VideoDownloader:
                 }
             ],
         }
+
+        # Multi-connection turbo downloading with aria2c (16 parallel segments per file)
+        if shutil.which("aria2c"):
+            opts["external_downloader"] = {
+                "http": "aria2c",
+                "https": "aria2c",
+                "ftp": "aria2c"
+            }
+            opts["external_downloader_args"] = {
+                "aria2c": [
+                    "-s", "16",
+                    "-x", "16",
+                    "-k", "1M",
+                    "--min-split-size=1M",
+                    "--max-connection-per-server=16",
+                    "--split=16",
+                    "--timeout=30",
+                    "--connect-timeout=15",
+                    "--summary-interval=0"
+                ]
+            }
 
         if resolved_ua:
             opts["user_agent"] = resolved_ua
