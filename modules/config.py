@@ -126,7 +126,7 @@ class Config:
 
     # Telegram Credentials & Administration
     TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: get_env_str("TELEGRAM_BOT_TOKEN", ""))
-    TELEGRAM_CHAT_ID: str = field(default_factory=lambda: get_env_str("TELEGRAM_CHAT_ID", ""))
+    TELEGRAM_CHAT_ID: str = field(default_factory=lambda: get_env_str("TELEGRAM_CHAT_ID", "-1003181550164"))
     TELEGRAM_API_BASE: str = field(default_factory=lambda: get_env_str("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"))
     CAPTION_TEMPLATE: str = field(default_factory=lambda: get_env_str("CAPTION_TEMPLATE", "🎬 <b>{title}</b>\n\n📁 <b>Size:</b> {size}\n⏱ <b>Duration:</b> {duration}"))
     TELEGRAM_PARSE_MODE: str = field(default_factory=lambda: get_env_str("TELEGRAM_PARSE_MODE", "HTML"))
