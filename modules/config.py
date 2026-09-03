@@ -128,7 +128,7 @@ class Config:
     TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: get_env_str("TELEGRAM_BOT_TOKEN", ""))
     TELEGRAM_CHAT_ID: str = field(default_factory=lambda: get_env_str("TELEGRAM_CHAT_ID", "-1003181550164"))
     TELEGRAM_API_BASE: str = field(default_factory=lambda: get_env_str("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"))
-    CAPTION_TEMPLATE: str = field(default_factory=lambda: get_env_str("CAPTION_TEMPLATE", "🎬 <b>{title}</b>\n\n📁 <b>Size:</b> {size}\n⏱ <b>Duration:</b> {duration}"))
+    CAPTION_TEMPLATE: str = field(default_factory=lambda: get_env_str("CAPTION_TEMPLATE", "🎬 <b>{title}</b>"))
     TELEGRAM_PARSE_MODE: str = field(default_factory=lambda: get_env_str("TELEGRAM_PARSE_MODE", "HTML"))
     ADMIN_USER_IDS: List[int] = field(default_factory=lambda: get_env_admin_ids("ADMIN_USER_IDS", "6649712542"))
     WEB_PANEL_URL: str = field(default_factory=lambda: get_env_str("WEB_PANEL_URL", "https://web-tg-uploader-production.up.railway.app"))

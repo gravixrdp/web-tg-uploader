@@ -12,6 +12,7 @@ Features:
 """
 
 import os
+import re
 import time
 import string
 import logging
@@ -29,6 +30,21 @@ DEFAULT_COOLDOWN = config.UPLOAD_COOLDOWN
 DEFAULT_CAPTION_TEMPLATE = config.CAPTION_TEMPLATE
 DEFAULT_PARSE_MODE = config.TELEGRAM_PARSE_MODE
 TELEGRAM_MAX_CAPTION_LENGTH = 1024
+
+
+def clean_display_title(title: str) -> str:
+    """Cleans up crawler artifacts from title for professional presentation in Telegram channel."""
+    if not title:
+        return "Untitled Media"
+    # Remove leading site metrics e.g. "12 min4.4K85%Black man..." -> "Black man... [12 min]"
+    m = re.match(r'^\s*(\d+\s*(?:min|sec|m|s))\s*[\d.]+[KkMmBb]?\s*\d+%\s*(.*)', title, re.IGNORECASE)
+    if m:
+        dur = m.group(1).strip()
+        main_t = m.group(2).strip()
+        if not re.search(r'\[\s*\d+\s*(?:min|sec|m|s)\s*\]', main_t, re.IGNORECASE):
+            return f"{main_t} [{dur}]"
+        return main_t
+    return title.strip()
 
 
 # ==============================================================================
@@ -441,8 +457,9 @@ class TelegramBotUploader:
         height = metadata.get("height", 0)
         resolution = f"{width}x{height}" if width and height else ""
 
-        # Base title fallback
-        base_title = title or metadata.get("title") or os.path.splitext(os.path.basename(file_path))[0]
+        # Clean and format title for professional presentation in Telegram channel
+        raw_title = str(title or metadata.get("title") or os.path.splitext(os.path.basename(file_path))[0])
+        base_title = clean_display_title(raw_title)
 
         now = datetime.datetime.now()
 
