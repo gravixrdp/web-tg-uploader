@@ -93,7 +93,7 @@ class VideoDownloader:
 
         opts: Dict[str, Any] = {
             "outtmpl": output_template,
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": "best[filesize<49M]/bestvideo[filesize<45M]+bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
             "quiet": True,
@@ -222,6 +222,97 @@ class VideoDownloader:
             if os.path.exists(thumb_output):
                 self.cleanup_file(thumb_output)
             return None
+
+    def _compress_video_for_telegram(
+        self,
+        video_path: str,
+        video_id: int,
+        duration: int,
+        target_max_mb: float = 48.0
+    ) -> Tuple[str, int]:
+        """
+        Compresses a video exceeding Telegram's 50MB Bot API limit using ffmpeg
+        so it uploads successfully without HTTP 413 (Payload Too Large).
+        Returns (path_to_video, file_size).
+        """
+        if not video_path or not os.path.exists(video_path):
+            return video_path, 0
+
+        current_size = os.path.getsize(video_path)
+        max_bytes = int(target_max_mb * 1024 * 1024)
+        if current_size <= max_bytes:
+            return video_path, current_size
+
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            logger.warning(
+                f"ffmpeg not available on PATH; cannot compress video {video_id} "
+                f"({current_size / (1024*1024):.1f}MB > {target_max_mb}MB limit)."
+            )
+            return video_path, current_size
+
+        eff_duration = duration if duration > 5 else 600
+        # Calculate target video bitrate in bits per second
+        total_bitrate_bps = int((max_bytes * 8) / eff_duration)
+        audio_bitrate_bps = 64000
+        video_bitrate_bps = max(120000, total_bitrate_bps - audio_bitrate_bps)
+
+        if video_bitrate_bps >= 450000:
+            scale_filter = "scale='min(720,iw)':-2"
+        elif video_bitrate_bps >= 250000:
+            scale_filter = "scale='min(480,iw)':-2"
+        else:
+            scale_filter = "scale='min(360,iw)':-2"
+
+        compressed_path = os.path.join(self.download_dir, f"video_{video_id}_tg50m.mp4")
+        logger.info(
+            f"Video {video_id} is {current_size / (1024*1024):.1f}MB (exceeds Telegram 50MB limit). "
+            f"Auto-compressing via ffmpeg to ~{target_max_mb}MB (bitrate: {video_bitrate_bps // 1000}kbps, scale: {scale_filter})..."
+        )
+
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-i", video_path,
+            "-c:v", "libx264",
+            "-b:v", str(video_bitrate_bps),
+            "-maxrate", str(int(video_bitrate_bps * 1.3)),
+            "-bufsize", str(int(video_bitrate_bps * 2)),
+            "-preset", "veryfast",
+            "-vf", scale_filter,
+            "-c:a", "aac",
+            "-b:a", "64k",
+            "-movflags", "+faststart",
+            compressed_path
+        ]
+
+        try:
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=400,
+                check=False
+            )
+            if res.returncode == 0 and os.path.exists(compressed_path):
+                compressed_size = os.path.getsize(compressed_path)
+                if compressed_size > 0 and compressed_size < current_size:
+                    logger.info(
+                        f"Auto-compression succeeded for video {video_id}: "
+                        f"{current_size / (1024*1024):.1f}MB -> {compressed_size / (1024*1024):.1f}MB"
+                    )
+                    try:
+                        os.remove(video_path)
+                    except Exception:
+                        pass
+                    return compressed_path, compressed_size
+
+            stderr_snippet = res.stderr.decode("utf-8", errors="ignore")[-300:] if res.stderr else ""
+            logger.error(f"ffmpeg compression returned non-zero code {res.returncode}: {stderr_snippet}")
+        except Exception as e:
+            logger.error(f"ffmpeg compression error for video {video_id}: {e}")
+
+        return video_path, current_size
 
     async def download_video(
         self,
@@ -373,6 +464,17 @@ class VideoDownloader:
                     )
 
                 metadata["thumbnail"] = thumb_path
+
+                # 4. Auto-compress if file exceeds Telegram's standard 50MB Bot API limit
+                if file_size > 49 * 1024 * 1024:
+                    target_file, file_size = self._compress_video_for_telegram(
+                        video_path=target_file,
+                        video_id=video_id,
+                        duration=metadata["duration"],
+                        target_max_mb=48.0
+                    )
+                    metadata["file_size"] = file_size
+
                 download_success = True
                 logger.info(f"Downloaded video {video_id}: {target_file} ({file_size / (1024*1024):.2f} MB)")
                 return target_file, metadata, None
